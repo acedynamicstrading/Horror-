@@ -5,9 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>AR Haunted House — Starter</title>
 
-  <!-- XRExtras: loading screen, full-window canvas, error handling. -->
-  <script src="./external/xrextras/xrextras.js"></script>
-
   <!-- 8th Wall Engine. "slam" chunk enables world tracking / plane detection. -->
   <script async src="./external/xr/xr.js" data-preload-chunks="slam"></script>
 
@@ -17,6 +14,7 @@
       padding: 0;
       overflow: hidden;
       height: 100%;
+      width: 100%;
       background: #000;
     }
     #camerafeed {
