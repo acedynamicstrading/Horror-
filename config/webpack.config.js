@@ -32,16 +32,6 @@ module.exports = {
           from: path.resolve(__dirname, '../node_modules/@8thwall/engine-binary/dist'),
           to: 'external/xr',
         },
-        // XRExtras helpers (loading screen, full-window canvas, error handling).
-        // NOTE: verify this matches the actual published package name/path in
-        // https://github.com/8thwall/8thwall/tree/main/packages/xrextras — the
-        // monorepo is young and package names may shift. If it differs, update
-        // this `from` path and the <script> tag in src/index.html to match.
-        {
-          from: path.resolve(__dirname, '../node_modules/@8thwall/xrextras/dist'),
-          to: 'external/xrextras',
-          noErrorOnMissing: true,
-        },
       ],
     }),
   ],
