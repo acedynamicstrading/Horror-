@@ -1,5 +1,11 @@
 import * as THREE from 'three'
 
+// 8th Wall's Threejs pipeline module expects a global window.THREE
+// (it assumes script-tag usage), but webpack keeps our import module-scoped.
+// Expose it globally so XR8.Threejs.pipelineModule() can find it.
+window.THREE = THREE
+
+
 // ---------------------------------------------------------------------------
 // On-screen debug logger. Prints errors directly on the page so they're
 // visible on a phone without needing devtools.
