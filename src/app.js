@@ -126,8 +126,9 @@ const initScenePipelineModule = () => {
     // Runs every frame. Drawing here (after 8th Wall's own Threejs pipeline
     // module has already rendered the plain scene) means our post-processed,
     // "haunted" composite is what actually ends up on screen.
-    onUpdate: () => {
-      if (hauntedVision) hauntedVision.render();
+    onRender: () => {
+  if (hauntedVision) hauntedVision.render()
+},
     },
   };
 };
