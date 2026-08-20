@@ -24,6 +24,26 @@ window.addEventListener('unhandledrejection', (event) => {
   debugLog(`UNHANDLED PROMISE REJECTION: ${event.reason}`)
 })
 
+// Resource-load failures (a 404/blocked fetch on a <script>, e.g. a lazily
+// fetched engine chunk) never reach window.onerror above — they only fire
+// a non-bubbling 'error' Event on the element itself, so this needs the
+// capture phase to see it. Best-effort: xr.js is `async` and may start
+// fetching its "slam" chunk before this bundle finishes loading, so a
+// clean read here doesn't rule this out — it just means nothing was
+// caught by this listener specifically.
+window.addEventListener('error', (event) => {
+  const t = event.target
+  if (t && t !== window && (t.src || t.href)) {
+    debugLog(`RESOURCE LOAD FAILED: <${t.tagName}> ${t.src || t.href}`)
+  }
+}, true)
+
+// SLAM/WASM engines commonly need SharedArrayBuffer, which requires the
+// page to be cross-origin isolated (COOP+COEP response headers). GitHub
+// Pages cannot send custom headers, so if this logs false, that's a
+// strong lead.
+debugLog(`self.crossOriginIsolated: ${self.crossOriginIsolated}`)
+
 // If window.XR8 never shows up, tell us — means xr.js loaded but never
 // initialized (e.g. SLAM chunk failed to load).
 setTimeout(() => {
@@ -74,8 +94,18 @@ const initScenePipelineModule = () => {
     canvas.style.height = '100%'
   }
 
+  let loggedFirstGpuFrame = false
+
   return {
     name: 'haunted-house-scene',
+
+    // Fires on every requesting → hasStream → hasVideo | failed transition.
+    // onStart (below) only ever fires after this reaches hasVideo, so this
+    // mainly matters if status ever reports 'failed' — the reason string
+    // tells you why in that case.
+    onCameraStatusChange: ({ status, reason }) => {
+      debugLog(`onCameraStatusChange: ${status}${reason ? ` (${reason})` : ''}`)
+    },
 
     onStart: ({ canvas, canvasWidth, canvasHeight }) => {
       debugLog('onStart fired — scene initializing.')
@@ -100,6 +130,16 @@ const initScenePipelineModule = () => {
       canvas.addEventListener('touchstart', onTouchStart, true)
 
       window.XR8.XrController.recenter()
+    },
+
+    // Fires every frame once the pipeline is actually running. Logged once
+    // so we can tell "the loop never got this far" (nothing appears below)
+    // apart from "the loop runs fine but rendering itself is broken"
+    // (this fires, canvas still black).
+    onProcessGpu: () => {
+      if (loggedFirstGpuFrame) return
+      loggedFirstGpuFrame = true
+      debugLog('onProcessGpu fired — per-frame pipeline is running.')
     },
 
     onUpdate: () => {},
