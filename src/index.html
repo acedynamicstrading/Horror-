@@ -38,10 +38,28 @@
       pointer-events: none;
       transition: opacity 0.3s ease;
     }
+    #debug {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      max-height: 60%;
+      overflow-y: auto;
+      background: rgba(200, 0, 0, 0.85);
+      color: #fff;
+      font-family: monospace;
+      font-size: 11px;
+      padding: 8px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      z-index: 9999;
+      display: none;
+    }
   </style>
 </head>
 <body>
   <canvas id="camerafeed"></canvas>
   <div id="hint">Move your phone slowly to scan the room, then tap a surface to place a prop</div>
+  <div id="debug"></div>
 </body>
 </html>
