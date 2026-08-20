@@ -156,7 +156,10 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      if (hauntedVision) hauntedVision.render()
+      // Haunted shader temporarily disabled — was making the feed too dark.
+      // Flip this back to `if (hauntedVision) hauntedVision.render()` to
+      // re-enable the vignette/desaturation/flash effect.
+      // if (hauntedVision) hauntedVision.render()
     },
   }
 }
