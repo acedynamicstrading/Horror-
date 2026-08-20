@@ -32,6 +32,17 @@ module.exports = {
           from: path.resolve(__dirname, '../node_modules/@8thwall/engine-binary/dist'),
           to: 'external/xr',
         },
+        // Service worker + manifest must ship as plain files at the output
+        // root (not bundled through src/app.js) so the browser can register
+        // sw.js directly and find manifest.json via the <link> tag.
+        {
+          from: path.resolve(__dirname, '../src/sw.js'),
+          to: 'sw.js',
+        },
+        {
+          from: path.resolve(__dirname, '../src/manifest.json'),
+          to: 'manifest.json',
+        },
       ],
     }),
   ],
