@@ -3,6 +3,7 @@ import { createHauntedVision } from './hauntedShader'
 import { createSurfaceSampler } from './surfaceSampler'
 import { createScareScheduler } from './scareSystem'
 import { createCrawlGhost } from './ghosts/crawlOutOfWall'
+import { createHeldPistol } from './heldPistol'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -41,7 +42,7 @@ setTimeout(() => {
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
-  let surfaceSampler, scareScheduler
+  let surfaceSampler, scareScheduler, heldPistol
   let clock
 
   // Small pool of reusable ghost instances rather than creating a new mesh
@@ -116,6 +117,15 @@ const initScenePipelineModule = () => {
         ghostPool.push(ghost)
       }
 
+      // Parented to the camera, once `camera` exists — see src/heldPistol.js
+      // for why parenting (not world placement) makes it track the view
+      // like a held prop instead of a fixed AR object.
+      heldPistol = createHeldPistol({ camera })
+
+      canvas.addEventListener('touchstart', () => {
+        if (heldPistol) heldPistol.fire()
+      })
+
       surfaceSampler = createSurfaceSampler()
       scareScheduler = createScareScheduler({
         surfaceSampler,
@@ -145,6 +155,7 @@ const initScenePipelineModule = () => {
       surfaceSampler.update()
       scareScheduler.update(delta, camera.position)
       ghostPool.forEach((ghost) => ghost.update(delta))
+      if (heldPistol) heldPistol.update()
     },
 
     // 8th Wall's per-frame lifecycle is:
@@ -157,8 +168,6 @@ const initScenePipelineModule = () => {
     // render that happens right after onUpdate.
     onRender: () => {
       // Haunted shader temporarily disabled — was making the feed too dark.
-      // Flip this back to `if (hauntedVision) hauntedVision.render()` to
-      // re-enable the vignette/desaturation/flash effect.
       // if (hauntedVision) hauntedVision.render()
     },
   }
