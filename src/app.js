@@ -1,5 +1,8 @@
 import * as THREE from 'three'
 import { createHauntedVision } from './hauntedShader'
+import { createSurfaceSampler } from './surfaceSampler'
+import { createScareScheduler } from './scareSystem'
+import { createCrawlGhost } from './ghosts/crawlOutOfWall'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -38,34 +41,22 @@ setTimeout(() => {
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
-  const placedProps = []
+  let surfaceSampler, scareScheduler
+  let clock
 
-  const placeholderPropAt = (position) => {
-    const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3)
-    const material = new THREE.MeshStandardMaterial({ color: 0x8a5a3b })
-    const cube = new THREE.Mesh(geometry, material)
-    cube.position.copy(position)
-    scene.add(cube)
-    placedProps.push(cube)
-  }
+  // Small pool of reusable ghost instances rather than creating a new mesh
+  // per scare — cheaper, and simple to reason about with only a few ghosts
+  // ever active on screen at once.
+  const GHOST_POOL_SIZE = 3
+  const ghostPool = []
 
-  const onHitTestResult = (hitResult) => {
-    if (!hitResult) return
-    const { position } = hitResult
-    placeholderPropAt(new THREE.Vector3(position.x, position.y, position.z))
-  }
+  const getIdleGhost = () => ghostPool.find((g) => !g.isActive())
 
-  const onTouchStart = (e) => {
-    if (e.touches.length !== 1) return
-    const { pageX, pageY } = e.touches[0]
-    const results = window.XR8.XrController.hitTest(
-      pageX,
-      pageY,
-      ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
-    )
-    if (results.length > 0) {
-      onHitTestResult(results[0])
-    }
+  const spawnGhostAt = (point) => {
+    const ghost = getIdleGhost()
+    if (!ghost) return // all ghosts already active — skip this scare attempt
+    const normal = point.normal || new THREE.Vector3(0, 1, 0)
+    ghost.spawnAt(point.position, normal)
   }
 
   const resizeCanvas = (canvas) => {
@@ -91,31 +82,69 @@ const initScenePipelineModule = () => {
       directional.position.set(0, 3, 1)
       scene.add(directional)
 
-      renderer.setSize(canvasWidth, canvasHeight)
-      camera.aspect = canvasWidth / canvasHeight
+      // Resize the canvas to its real on-screen backing-store size FIRST.
+      // canvasWidth/canvasHeight (8th Wall's own numbers) can differ from
+      // window.innerWidth/innerHeight (device pixel ratio, browser chrome
+      // collapsing, etc). Sizing the renderer/composer off the pre-resize
+      // numbers and THEN resizing the canvas afterward is what caused the
+      // black unrendered rectangle in the corner — the composer's render
+      // targets ended up a different size than the actual canvas.
+      resizeCanvas(canvas)
+
+      renderer.setSize(canvas.width, canvas.height)
+      camera.aspect = canvas.width / canvas.height
       camera.updateProjectionMatrix()
 
       hauntedVision = createHauntedVision({
         renderer,
         scene,
         camera,
-        width: canvasWidth,
-        height: canvasHeight,
+        width: canvas.width,
+        height: canvas.height,
       })
       // Expose the flash trigger globally so game logic anywhere (proximity
       // checks, timers, item-use handlers, monster abilities) can call
       // window.hauntedVision.flash() for a scripted jump-scare beat.
       window.hauntedVision = hauntedVision
 
-      resizeCanvas(canvas)
+      // Ghost pool: each is added to the scene once, hidden, reused per spawn.
+      for (let i = 0; i < GHOST_POOL_SIZE; i++) {
+        const ghost = createCrawlGhost({
+          onRevealPeak: () => hauntedVision.flash(450),
+        })
+        scene.add(ghost.mesh)
+        ghostPool.push(ghost)
+      }
+
+      surfaceSampler = createSurfaceSampler()
+      scareScheduler = createScareScheduler({
+        surfaceSampler,
+        spawnGhost: spawnGhostAt,
+        flash: hauntedVision.flash,
+      })
+      clock = new THREE.Clock()
+
       window.addEventListener('resize', () => {
         resizeCanvas(canvas)
-        hauntedVision.setSize(window.innerWidth, window.innerHeight)
+        renderer.setSize(canvas.width, canvas.height)
+        camera.aspect = canvas.width / canvas.height
+        camera.updateProjectionMatrix()
+        hauntedVision.setSize(canvas.width, canvas.height)
       })
 
-      canvas.addEventListener('touchstart', onTouchStart, true)
-
       window.XR8.XrController.recenter()
+    },
+
+    // Game-logic tick: scan for surfaces, decide/roll scares, advance any
+    // active ghost's emergence animation. Kept separate from onRender, which
+    // is drawing-only.
+    onUpdate: () => {
+      if (!surfaceSampler) return
+      const delta = clock.getDelta()
+
+      surfaceSampler.update()
+      scareScheduler.update(delta, camera.position)
+      ghostPool.forEach((ghost) => ghost.update(delta))
     },
 
     // 8th Wall's per-frame lifecycle is:
@@ -156,6 +185,17 @@ const onxrloaded = () => {
 }
 
 debugLog(`Page script started. window.XR8 present at script-run time: ${!!window.XR8}`)
+
+// Register the service worker: caches the heavy 8th Wall SLAM engine binary
+// for fast repeat loads, while your own app code stays network-first (see
+// src/sw.js for why — this keeps development from ever showing stale code).
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch((err) => {
+      debugLog(`Service worker registration failed: ${err.message}`)
+    })
+  })
+}
 
 window.XR8
   ? onxrloaded()

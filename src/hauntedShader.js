@@ -1,7 +1,7 @@
-import * as THREE from "three";
-import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
-import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
-import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import * as THREE from 'three'
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js'
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 
 // ---------------------------------------------------------------------------
 // "Ghost-sight" post-process shader.
@@ -68,48 +68,42 @@ const hauntedShader = {
       gl_FragColor = vec4(color.rgb, color.a);
     }
   `,
-};
+}
 
-export const createHauntedVision = ({
-  renderer,
-  scene,
-  camera,
-  width,
-  height,
-}) => {
-  const composer = new EffectComposer(renderer);
-  composer.addPass(new RenderPass(scene, camera));
+export const createHauntedVision = ({ renderer, scene, camera, width, height }) => {
+  const composer = new EffectComposer(renderer)
+  composer.addPass(new RenderPass(scene, camera))
 
-  const shaderPass = new ShaderPass(hauntedShader);
-  shaderPass.renderToScreen = true;
-  composer.addPass(shaderPass);
+  const shaderPass = new ShaderPass(hauntedShader)
+  shaderPass.renderToScreen = true
+  composer.addPass(shaderPass)
 
-  composer.setSize(width, height);
+  composer.setSize(width, height)
 
-  let flashTarget = 0; // where uFlash is tweening toward
-  const clock = new THREE.Clock();
+  let flashTarget = 0 // where uFlash is tweening toward
+  const clock = new THREE.Clock()
 
-  const setSize = (w, h) => composer.setSize(w, h);
+  const setSize = (w, h) => composer.setSize(w, h)
 
   // Call every frame (from onUpdate) instead of renderer.render(scene, camera).
   const render = () => {
-    shaderPass.uniforms.uTime.value = clock.getElapsedTime();
+    shaderPass.uniforms.uTime.value = clock.getElapsedTime()
 
     // Ease uFlash toward its target so transitions feel like a beat, not a snap.
-    const current = shaderPass.uniforms.uFlash.value;
-    shaderPass.uniforms.uFlash.value += (flashTarget - current) * 0.15;
+    const current = shaderPass.uniforms.uFlash.value
+    shaderPass.uniforms.uFlash.value += (flashTarget - current) * 0.15
 
-    composer.render();
-  };
+    composer.render()
+  }
 
   // Trigger a scripted jump-scare flash: quick brighten, hold, snap back to dark.
   // durationMs: how long to stay bright before returning to the haunted baseline.
   const flash = (durationMs = 400) => {
-    flashTarget = 1;
+    flashTarget = 1
     setTimeout(() => {
-      flashTarget = 0;
-    }, durationMs);
-  };
+      flashTarget = 0
+    }, durationMs)
+  }
 
-  return { render, setSize, flash };
-};
+  return { render, setSize, flash }
+}

@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>AR Haunted House — Starter</title>
+  <link rel="manifest" href="./manifest.json">
+  <meta name="theme-color" content="#000000">
 
   <!-- 8th Wall Engine. "slam" chunk enables world tracking / plane detection. -->
   <script async src="./external/xr/xr.js" data-preload-chunks="slam"></script>
@@ -59,7 +61,7 @@
 </head>
 <body>
   <canvas id="camerafeed"></canvas>
-  <div id="hint">Move your phone slowly to scan the room, then tap a surface to place a prop</div>
+  <div id="hint">Move your phone slowly to scan the room...</div>
   <div id="debug"></div>
 </body>
 </html>
