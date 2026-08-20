@@ -44,6 +44,15 @@ const initScenePipelineModule = () => {
     }
   }
 
+  // Manually keep the canvas full-window across orientation changes, since
+  // we dropped the XRExtras.FullWindowCanvas helper.
+  const resizeCanvas = (canvas) => {
+    canvas.width = window.innerWidth
+    canvas.height = window.innerHeight
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+  }
+
   return {
     name: 'haunted-house-scene',
 
@@ -63,6 +72,9 @@ const initScenePipelineModule = () => {
       renderer.setSize(canvasWidth, canvasHeight)
       camera.aspect = canvasWidth / canvasHeight
       camera.updateProjectionMatrix()
+
+      resizeCanvas(canvas)
+      window.addEventListener('resize', () => resizeCanvas(canvas))
 
       canvas.addEventListener('touchstart', onTouchStart, true)
 
@@ -85,9 +97,6 @@ const onxrloaded = () => {
     window.XR8.GlTextureRenderer.pipelineModule(),   // Draws the camera feed.
     window.XR8.Threejs.pipelineModule(),             // Creates a Three.js AR scene.
     window.XR8.XrController.pipelineModule(),        // Enables SLAM world tracking.
-    window.XRExtras.FullWindowCanvas.pipelineModule(), // Canvas fills the window.
-    window.XRExtras.Loading.pipelineModule(),        // Loading screen while SLAM initializes.
-    window.XRExtras.RuntimeError.pipelineModule(),   // Friendly error overlay on crash.
     initScenePipelineModule(),                        // Our scene + tap-to-place logic.
   ])
 
