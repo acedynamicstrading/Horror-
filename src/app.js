@@ -1,176 +1,167 @@
-import * as THREE from 'three'
+import * as THREE from "three";
+import { createHauntedVision } from "./hauntedShader";
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
 // Expose it globally so XR8.Threejs.pipelineModule() can find it.
-window.THREE = THREE
-
+window.THREE = THREE;
 
 // ---------------------------------------------------------------------------
 // On-screen debug logger. Prints errors directly on the page so they're
 // visible on a phone without needing devtools.
 // ---------------------------------------------------------------------------
 const debugLog = (msg) => {
-  const el = document.getElementById('debug')
-  if (!el) return
-  el.style.display = 'block'
-  el.textContent += msg + '\n\n'
-}
+  const el = document.getElementById("debug");
+  if (!el) return;
+  el.style.display = "block";
+  el.textContent += msg + "\n\n";
+};
 
 window.onerror = (message, source, lineno, colno, error) => {
-  debugLog(`ERROR: ${message}\nat ${source}:${lineno}:${colno}\n${error && error.stack ? error.stack : ''}`)
-}
-window.addEventListener('unhandledrejection', (event) => {
-  debugLog(`UNHANDLED PROMISE REJECTION: ${event.reason}`)
-})
-
-// Resource-load failures (a 404/blocked fetch on a <script>, e.g. a lazily
-// fetched engine chunk) never reach window.onerror above — they only fire
-// a non-bubbling 'error' Event on the element itself, so this needs the
-// capture phase to see it. Best-effort: xr.js is `async` and may start
-// fetching its "slam" chunk before this bundle finishes loading, so a
-// clean read here doesn't rule this out — it just means nothing was
-// caught by this listener specifically.
-window.addEventListener('error', (event) => {
-  const t = event.target
-  if (t && t !== window && (t.src || t.href)) {
-    debugLog(`RESOURCE LOAD FAILED: <${t.tagName}> ${t.src || t.href}`)
-  }
-}, true)
-
-// SLAM/WASM engines commonly need SharedArrayBuffer, which requires the
-// page to be cross-origin isolated (COOP+COEP response headers). GitHub
-// Pages cannot send custom headers, so if this logs false, that's a
-// strong lead.
-debugLog(`self.crossOriginIsolated: ${self.crossOriginIsolated}`)
+  debugLog(
+    `ERROR: ${message}\nat ${source}:${lineno}:${colno}\n${ error && error.stack ? error.stack : "" }`
+  );
+};
+window.addEventListener("unhandledrejection", (event) => {
+  debugLog(`UNHANDLED PROMISE REJECTION: ${event.reason}`);
+});
 
 // If window.XR8 never shows up, tell us — means xr.js loaded but never
 // initialized (e.g. SLAM chunk failed to load).
 setTimeout(() => {
   if (!window.XR8) {
-    debugLog('window.XR8 is still undefined 6s after page load. The engine script likely failed to initialize.')
+    debugLog(
+      "window.XR8 is still undefined 6s after page load. The engine script likely failed to initialize."
+    );
   }
-}, 6000)
+}, 6000);
 
 // ---------------------------------------------------------------------------
 // Custom Three.js pipeline module.
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
-  let scene, camera, renderer
-  const placedProps = []
+  let scene, camera, renderer, hauntedVision;
+  const placedProps = [];
 
   const placeholderPropAt = (position) => {
-    const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3)
-    const material = new THREE.MeshStandardMaterial({ color: 0x8a5a3b })
-    const cube = new THREE.Mesh(geometry, material)
-    cube.position.copy(position)
-    scene.add(cube)
-    placedProps.push(cube)
-  }
+    const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+    const material = new THREE.MeshStandardMaterial({ color: 0x8a5a3b });
+    const cube = new THREE.Mesh(geometry, material);
+    cube.position.copy(position);
+    scene.add(cube);
+    placedProps.push(cube);
+  };
 
   const onHitTestResult = (hitResult) => {
-    if (!hitResult) return
-    const { position } = hitResult
-    placeholderPropAt(new THREE.Vector3(position.x, position.y, position.z))
-  }
+    if (!hitResult) return;
+    const { position } = hitResult;
+    placeholderPropAt(new THREE.Vector3(position.x, position.y, position.z));
+  };
 
   const onTouchStart = (e) => {
-    if (e.touches.length !== 1) return
-    const { pageX, pageY } = e.touches[0]
-    const results = window.XR8.XrController.hitTest(
-      pageX,
-      pageY,
-      ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
-    )
+    if (e.touches.length !== 1) return;
+    const { pageX, pageY } = e.touches[0];
+    const results = window.XR8.XrController.hitTest(pageX, pageY, [
+      "FEATURE_POINT",
+      "ESTIMATED_SURFACE",
+    ]);
     if (results.length > 0) {
-      onHitTestResult(results[0])
+      onHitTestResult(results[0]);
     }
-  }
+  };
 
   const resizeCanvas = (canvas) => {
-    canvas.width = window.innerWidth
-    canvas.height = window.innerHeight
-    canvas.style.width = '100%'
-    canvas.style.height = '100%'
-  }
-
-  let loggedFirstGpuFrame = false
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+  };
 
   return {
-    name: 'haunted-house-scene',
-
-    // Fires on every requesting → hasStream → hasVideo | failed transition.
-    // onStart (below) only ever fires after this reaches hasVideo, so this
-    // mainly matters if status ever reports 'failed' — the reason string
-    // tells you why in that case.
-    onCameraStatusChange: ({ status, reason }) => {
-      debugLog(`onCameraStatusChange: ${status}${reason ? ` (${reason})` : ''}`)
-    },
+    name: "haunted-house-scene",
 
     onStart: ({ canvas, canvasWidth, canvasHeight }) => {
-      debugLog('onStart fired — scene initializing.')
-      const { camera: xrCamera, scene: xrScene, renderer: xrRenderer } =
-        window.XR8.Threejs.xrScene()
-      scene = xrScene
-      camera = xrCamera
-      renderer = xrRenderer
+      debugLog("onStart fired — scene initializing.");
+      const {
+        camera: xrCamera,
+        scene: xrScene,
+        renderer: xrRenderer,
+      } = window.XR8.Threejs.xrScene();
+      scene = xrScene;
+      camera = xrCamera;
+      renderer = xrRenderer;
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.6))
-      const directional = new THREE.DirectionalLight(0xffffff, 0.8)
-      directional.position.set(0, 3, 1)
-      scene.add(directional)
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const directional = new THREE.DirectionalLight(0xffffff, 0.8);
+      directional.position.set(0, 3, 1);
+      scene.add(directional);
 
-      renderer.setSize(canvasWidth, canvasHeight)
-      camera.aspect = canvasWidth / canvasHeight
-      camera.updateProjectionMatrix()
+      renderer.setSize(canvasWidth, canvasHeight);
+      camera.aspect = canvasWidth / canvasHeight;
+      camera.updateProjectionMatrix();
 
-      resizeCanvas(canvas)
-      window.addEventListener('resize', () => resizeCanvas(canvas))
+      hauntedVision = createHauntedVision({
+        renderer,
+        scene,
+        camera,
+        width: canvasWidth,
+        height: canvasHeight,
+      });
+      // Expose the flash trigger globally so game logic anywhere (proximity
+      // checks, timers, item-use handlers, monster abilities) can call
+      // window.hauntedVision.flash() for a scripted jump-scare beat.
+      window.hauntedVision = hauntedVision;
 
-      canvas.addEventListener('touchstart', onTouchStart, true)
+      resizeCanvas(canvas);
+      window.addEventListener("resize", () => {
+        resizeCanvas(canvas);
+        hauntedVision.setSize(window.innerWidth, window.innerHeight);
+      });
 
-      window.XR8.XrController.recenter()
+      canvas.addEventListener("touchstart", onTouchStart, true);
+
+      window.XR8.XrController.recenter();
     },
 
-    // Fires every frame once the pipeline is actually running. Logged once
-    // so we can tell "the loop never got this far" (nothing appears below)
-    // apart from "the loop runs fine but rendering itself is broken"
-    // (this fires, canvas still black).
-    onProcessGpu: () => {
-      if (loggedFirstGpuFrame) return
-      loggedFirstGpuFrame = true
-      debugLog('onProcessGpu fired — per-frame pipeline is running.')
+    // Runs every frame. Drawing here (after 8th Wall's own Threejs pipeline
+    // module has already rendered the plain scene) means our post-processed,
+    // "haunted" composite is what actually ends up on screen.
+    onUpdate: () => {
+      if (hauntedVision) hauntedVision.render();
     },
-
-    onUpdate: () => {},
-  }
-}
+  };
+};
 
 // ---------------------------------------------------------------------------
 // Boot sequence
 // ---------------------------------------------------------------------------
 const onxrloaded = () => {
   try {
-    debugLog('xrloaded fired. window.XR8 is present, wiring up pipeline modules...')
+    debugLog(
+      "xrloaded fired. window.XR8 is present, wiring up pipeline modules..."
+    );
 
     window.XR8.addCameraPipelineModules([
       window.XR8.GlTextureRenderer.pipelineModule(),
       window.XR8.Threejs.pipelineModule(),
       window.XR8.XrController.pipelineModule(),
       initScenePipelineModule(),
-    ])
+    ]);
 
-    const canvas = document.getElementById('camerafeed')
-    debugLog('Calling XR8.run()...')
-    window.XR8.run({ canvas, allowedDevices: window.XR8.XrConfig.device().ANY })
-    debugLog('XR8.run() called without throwing.')
+    const canvas = document.getElementById("camerafeed");
+    debugLog("Calling XR8.run()...");
+    window.XR8.run({
+      canvas,
+      allowedDevices: window.XR8.XrConfig.device().ANY,
+    });
+    debugLog("XR8.run() called without throwing.");
   } catch (err) {
-    debugLog(`CAUGHT ERROR in onxrloaded: ${err.message}\n${err.stack}`)
+    debugLog(`CAUGHT ERROR in onxrloaded: ${err.message}\n${err.stack}`);
   }
-}
+};
 
-debugLog(`Page script started. window.XR8 present at script-run time: ${!!window.XR8}`)
+debugLog(
+  `Page script started. window.XR8 present at script-run time: ${!!window.XR8}`
+);
 
-window.XR8
-  ? onxrloaded()
-  : window.addEventListener('xrloaded', onxrloaded)
+window.XR8 ? onxrloaded() : window.addEventListener("xrloaded", onxrloaded);
