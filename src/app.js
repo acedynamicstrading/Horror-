@@ -69,6 +69,7 @@ const initScenePipelineModule = () => {
   let clock
   let lastTrackingStatus = null
   let hasLoggedTrackingSample = false
+  let hasLoggedRawProcessCpu = false
 
   // Live lighting estimation — references to the two fixed-intensity lights
   // created in onStart, so onProcessCpu can drive their brightness/warmth
@@ -278,6 +279,25 @@ const initScenePipelineModule = () => {
     // wasGood/isBad check below if the real values differ.
     onProcessCpu: (processCpuResult) => {
       if (!gameState) return
+
+      // One-time, unconditional ground-truth dump — the lighting/worldPoints/
+      // trackingStatus logs below never fired on-device, which is itself the
+      // signal that matters: either `reality` isn't present at all on this
+      // engine binary build, or it's shaped differently than 8th Wall's
+      // public docs describe. Logging the raw keys here (regardless of
+      // whether anything looks "valid") replaces guessing with an actual
+      // answer the next time this runs on-device.
+      if (!hasLoggedRawProcessCpu) {
+        hasLoggedRawProcessCpu = true
+        const topKeys = processCpuResult ? Object.keys(processCpuResult) : null
+        const realityKeys = processCpuResult && processCpuResult.reality ? Object.keys(processCpuResult.reality) : null
+        debugLog(
+          `RAW onProcessCpu diagnostic — top-level keys: ${JSON.stringify(topKeys)}\n` +
+          `reality present: ${!!(processCpuResult && processCpuResult.reality)}\n` +
+          `reality keys: ${JSON.stringify(realityKeys)}`
+        )
+      }
+
       const reality = processCpuResult && processCpuResult.reality
       if (!reality) return
 
