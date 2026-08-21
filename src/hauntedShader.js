@@ -71,7 +71,7 @@ const hauntedShader = {
 
       // Desaturate toward baseline, less desaturated during a flash.
       float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-      float desatAmount = mix(0.85, 0.15, uFlash);
+      float desatAmount = mix(0.45, 0.15, uFlash);
       color.rgb = mix(color.rgb, vec3(gray), desatAmount);
 
       // Cold, slightly sickly tint for the "haunted" baseline.
@@ -80,12 +80,12 @@ const hauntedShader = {
 
       // Vignette: strong at baseline, pulls back during a flash.
       vec2 centered = vUv - 0.5;
-      float vignette = 1.0 - dot(centered, centered) * mix(2.2, 0.4, uFlash);
+      float vignette = 1.0 - dot(centered, centered) * mix(1.3, 0.4, uFlash);
       vignette = clamp(vignette, 0.0, 1.0);
       color.rgb *= vignette;
 
       // Overall exposure: dark baseline, brightened during a flash.
-      float exposure = mix(0.35, 1.15, uFlash);
+      float exposure = mix(0.75, 1.15, uFlash);
       color.rgb *= exposure;
 
       // Film grain, constant texture regardless of flash state. Amplified
