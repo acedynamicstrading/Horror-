@@ -70,6 +70,23 @@ const initScenePipelineModule = () => {
   let lastTrackingStatus = null
   let hasLoggedTrackingSample = false
 
+  // Live lighting estimation — references to the two fixed-intensity lights
+  // created in onStart, so onProcessCpu can drive their brightness/warmth
+  // from the real room instead of the hardcoded 0.6/0.8 they start at.
+  let ambientLight, directionalLight
+  let hasLoggedLightingSample = false
+  // Smoothed 0..1 target — the raw estimate can be noisy frame to frame
+  // (camera auto-exposure hunting, brief occlusion by a hand), and jumping
+  // straight to it would read as flickering rather than "matching the room."
+  let smoothedLightLevel = 0.6
+
+  // World-point scan feedback — reality.worldPoints is the raw SLAM feature
+  // cloud; we don't need per-point data, just a live count to fold into the
+  // existing "Searching for a breach..." scan hint alongside the wall/floor
+  // pool sizes already shown there.
+  let hasLoggedWorldPointsSample = false
+  let latestWorldPointCount = 0
+
   // Small pool of reusable ghost instances rather than creating a new mesh
   // per scare — cheaper, and simple to reason about with only a few ghosts
   // ever active on screen at once.
@@ -78,11 +95,15 @@ const initScenePipelineModule = () => {
 
   const getIdleGhost = () => ghostPool.find((g) => !g.isActive())
 
-  const spawnGhostAt = (point) => {
+  // `opts.isRefind` comes from scareScheduler: true when this spawn point
+  // was drawn from the fledTargets queue (a specific location awaiting
+  // re-find), false for a fresh first-ever reveal. Passed straight through
+  // to the ghost instance, which is what actually gates isCapturable().
+  const spawnGhostAt = (point, opts = {}) => {
     const ghost = getIdleGhost()
     if (!ghost) return // all ghosts already active — skip this scare attempt
     const normal = point.normal || new THREE.Vector3(0, 1, 0)
-    ghost.spawnAt(point.position, normal)
+    ghost.spawnAt(point.position, normal, opts)
   }
 
   const resizeCanvas = (canvas) => {
@@ -103,10 +124,13 @@ const initScenePipelineModule = () => {
       camera = xrCamera
       renderer = xrRenderer
 
-      scene.add(new THREE.AmbientLight(0xffffff, 0.6))
+      const ambient = new THREE.AmbientLight(0xffffff, 0.6)
+      scene.add(ambient)
       const directional = new THREE.DirectionalLight(0xffffff, 0.8)
       directional.position.set(0, 3, 1)
       scene.add(directional)
+      ambientLight = ambient
+      directionalLight = directional
 
       // Resize the canvas to its real on-screen backing-store size FIRST.
       // canvasWidth/canvasHeight (8th Wall's own numbers) can differ from
@@ -144,6 +168,18 @@ const initScenePipelineModule = () => {
           for (let i = 0; i < GHOST_POOL_SIZE; i++) {
             const ghost = createSkeletonGhostInstance(template, {
               onRevealPeak: () => hauntedVision.flash(450),
+              // Asked only on a scare-only first reveal, once it's ready to
+              // duck away. Excludes the point it's currently at so "flee"
+              // actually means somewhere else, not a near-duplicate spot.
+              onNeedFleeTarget: (currentPoint) =>
+                surfaceSampler.getRandomPointExcluding('any', currentPoint, 0.8),
+              // fledTo (present only for the first-reveal flee path, null
+              // for a capturable re-find's forceDespawn) gets registered
+              // with the scheduler so THAT exact point's next spawn comes
+              // back through as isRefind: true.
+              onDespawn: ({ fledTo } = {}) => {
+                if (fledTo && scareScheduler) scareScheduler.registerFledTarget(fledTo)
+              },
             })
             scene.add(ghost.mesh)
             ghostPool.push(ghost)
@@ -211,8 +247,9 @@ const initScenePipelineModule = () => {
 
       if (gameState.getState() === GameStates.SCANNING) {
         const sizes = surfaceSampler.poolSizes()
+        const pointsNote = latestWorldPointCount > 0 ? ` · ${latestWorldPointCount} points mapped` : ''
         setHintText(
-          `Searching for a breach... (walls ${Math.min(sizes.wall, 3)}/3, floor ${Math.min(sizes.floor, 2)}/2) — move slowly, angle the phone at walls and the floor.`,
+          `Searching for a breach... (walls ${Math.min(sizes.wall, 3)}/3, floor ${Math.min(sizes.floor, 2)}/2)${pointsNote} — move slowly, angle the phone at walls and the floor.`,
         )
       }
 
@@ -242,8 +279,53 @@ const initScenePipelineModule = () => {
     onProcessCpu: (processCpuResult) => {
       if (!gameState) return
       const reality = processCpuResult && processCpuResult.reality
-      if (!reality || !reality.trackingStatus) return
+      if (!reality) return
 
+      // ---- lighting estimation -> drive the two scene lights live ----
+      // The exact shape of reality.lighting isn't pinned down in 8th Wall's
+      // public docs (only that it exists on the reality payload once
+      // enableLighting is on) — so this logs its first real sample the same
+      // way trackingStatus is logged below, and tries several plausible
+      // field names defensively rather than assuming one. Check the debug
+      // log on-device and simplify this to whichever field actually shows
+      // up once confirmed.
+      if (reality.lighting) {
+        if (!hasLoggedLightingSample) {
+          hasLoggedLightingSample = true
+          debugLog(`First lighting sample: ${JSON.stringify(reality.lighting)}`)
+        }
+        const L = reality.lighting
+        // Try known/likely field names in order; normalize into a 0..1 range.
+        // Camera exposure-style values (e.g. EV/exposure) are typically NOT
+        // already 0..1, so those get a rough log-ish squash instead of a
+        // raw clamp — approximate on purpose, it's driving mood lighting,
+        // not a physically-correct render.
+        let raw = null
+        if (typeof L.intensity === 'number') raw = L.intensity
+        else if (typeof L.ambientIntensity === 'number') raw = L.ambientIntensity
+        else if (typeof L.brightness === 'number') raw = L.brightness
+        else if (typeof L.exposure === 'number') raw = 1 / (1 + Math.exp(-(L.exposure - 1))) // rough squash toward 0..1
+        else if (typeof L.ev === 'number') raw = Math.min(1, Math.max(0, (L.ev + 3) / 10))
+
+        if (raw != null) {
+          const target = Math.min(1, Math.max(0.08, raw)) // floor so the scene never goes fully black from a bad sample
+          smoothedLightLevel += (target - smoothedLightLevel) * 0.08 // slow lerp — avoids visible flicker
+          if (ambientLight) ambientLight.intensity = 0.25 + smoothedLightLevel * 0.6
+          if (directionalLight) directionalLight.intensity = 0.3 + smoothedLightLevel * 0.9
+        }
+      }
+
+      // ---- world points -> feed the scan-progress hint text ----
+      if (Array.isArray(reality.worldPoints)) {
+        if (!hasLoggedWorldPointsSample && reality.worldPoints.length > 0) {
+          hasLoggedWorldPointsSample = true
+          debugLog(`First worldPoints sample: ${reality.worldPoints.length} points. Example point: ${JSON.stringify(reality.worldPoints[0])}`)
+        }
+        latestWorldPointCount = reality.worldPoints.length
+      }
+
+      // ---- tracking status (existing) ----
+      if (!reality.trackingStatus) return
       const status = reality.trackingStatus
       if (!hasLoggedTrackingSample) {
         hasLoggedTrackingSample = true
@@ -292,6 +374,14 @@ const onxrloaded = () => {
       window.XR8.XrController.pipelineModule(),
       initScenePipelineModule(),
     ])
+
+    // Both flags default OFF — without this call, reality.lighting and
+    // reality.worldPoints are simply absent from onProcessCpu's payload every
+    // frame, no matter what we do downstream. Doesn't touch VPS/hand tracking
+    // (not requesting enableVps here — that's excluded from the distributed
+    // engine binary anyway and would be a no-op at best).
+    debugLog('Calling XR8.XrController.configure({ enableLighting, enableWorldPoints })...')
+    window.XR8.XrController.configure({ enableLighting: true, enableWorldPoints: true })
 
     const canvas = document.getElementById('camerafeed')
     debugLog('Calling XR8.run()...')
