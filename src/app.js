@@ -22,6 +22,7 @@ const debugLog = (msg) => {
   el.style.display = 'block'
   el.textContent += msg + '\n\n'
 }
+window.debugLog = debugLog
 
 window.onerror = (message, source, lineno, colno, error) => {
   debugLog(`ERROR: ${message}\nat ${source}:${lineno}:${colno}\n${error && error.stack ? error.stack : ''}`)

@@ -46,6 +46,7 @@ const isFarEnoughFromPool = (pool, position) =>
 
 export const createSurfaceSampler = () => {
   const pools = { wall: [], floor: [], other: [] }
+  let hasLoggedSample = false
 
   const sampleOnce = () => {
     if (!window.XR8 || !window.XR8.XrController) return
@@ -57,6 +58,17 @@ export const createSurfaceSampler = () => {
     if (!results || results.length === 0) return
 
     const hit = results[0]
+
+    // One-time diagnostic: dump the actual shape of a real hit result so we
+    // can confirm whether `rotation` is present/meaningful, instead of
+    // guessing at classifySurface's assumptions. Safe to remove once
+    // confirmed.
+    if (!hasLoggedSample) {
+      hasLoggedSample = true
+      if (window.debugLog) {
+        window.debugLog(`Sample hit result:\n${JSON.stringify(hit, null, 1)}`)
+      }
+    }
     const position = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
     const type = classifySurface(hit)
     const pool = pools[type]
