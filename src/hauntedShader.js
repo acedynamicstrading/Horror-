@@ -20,6 +20,10 @@ const hauntedShader = {
     uTime: { value: 0 },
     // 0 = fully dark/haunted baseline. 1 = fully bright/revealed (flash peak).
     uFlash: { value: 0 },
+    // 0 = normal. 1 = "signal disrupted" glitch state — used when SLAM
+    // tracking gets lost/reset (e.g. walking into an unscanned room), so the
+    // moment reads as in-fiction interference rather than a broken app.
+    uGlitch: { value: 0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -32,15 +36,38 @@ const hauntedShader = {
     uniform sampler2D tDiffuse;
     uniform float uTime;
     uniform float uFlash;
+    uniform float uGlitch;
     varying vec2 vUv;
 
-    // Cheap pseudo-random for film grain.
+    // Cheap pseudo-random for film grain / glitch noise.
     float rand(vec2 co) {
       return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
     }
 
     void main() {
-      vec4 color = texture2D(tDiffuse, vUv);
+      vec2 uv = vUv;
+
+      if (uGlitch > 0.0) {
+        // Chunky horizontal row displacement — the classic "signal breaking
+        // up" look, not a smooth effect.
+        float band = floor(uv.y * 24.0);
+        float bandNoise = rand(vec2(band, floor(uTime * 14.0)));
+        float shift = (bandNoise - 0.5) * 0.06 * uGlitch;
+        uv.x += shift;
+      }
+
+      vec4 color = texture2D(tDiffuse, uv);
+
+      if (uGlitch > 0.0) {
+        // RGB channel split — sample red/blue from slightly offset UVs.
+        float split = 0.006 * uGlitch;
+        color.r = texture2D(tDiffuse, uv + vec2(split, 0.0)).r;
+        color.b = texture2D(tDiffuse, uv - vec2(split, 0.0)).b;
+
+        // Occasional near-total dropout, like a dropped frame.
+        float dropout = step(0.93, rand(vec2(floor(uTime * 20.0), 1.0)));
+        color.rgb *= 1.0 - dropout * 0.85 * uGlitch;
+      }
 
       // Desaturate toward baseline, less desaturated during a flash.
       float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
@@ -61,8 +88,10 @@ const hauntedShader = {
       float exposure = mix(0.35, 1.15, uFlash);
       color.rgb *= exposure;
 
-      // Film grain, constant texture regardless of flash state.
-      float grain = (rand(vUv * uTime) - 0.5) * 0.06;
+      // Film grain, constant texture regardless of flash state. Amplified
+      // during a glitch for extra "static" texture.
+      float grainAmount = mix(0.06, 0.16, uGlitch);
+      float grain = (rand(vUv * uTime) - 0.5) * grainAmount;
       color.rgb += grain;
 
       gl_FragColor = vec4(color.rgb, color.a);
@@ -105,5 +134,17 @@ export const createHauntedVision = ({ renderer, scene, camera, width, height }) 
     }, durationMs)
   }
 
-  return { render, setSize, flash }
+  // The "portal opening" reveal, once enough of the room has been scanned —
+  // same mechanism as flash(), just a longer, more deliberate hold to read
+  // as a discovery beat rather than a jump scare.
+  const portalOpen = (durationMs = 1200) => flash(durationMs)
+
+  // Toggles the "signal disrupted" glitch look — used when SLAM tracking
+  // gets lost/reset (e.g. player walked into an unscanned room). Instant,
+  // not eased — glitches should look abrupt, not smooth.
+  const setGlitch = (active) => {
+    shaderPass.uniforms.uGlitch.value = active ? 1 : 0
+  }
+
+  return { render, setSize, flash, portalOpen, setGlitch }
 }

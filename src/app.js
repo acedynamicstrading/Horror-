@@ -2,7 +2,8 @@ import * as THREE from 'three'
 import { createHauntedVision } from './hauntedShader'
 import { createSurfaceSampler } from './surfaceSampler'
 import { createScareScheduler } from './scareSystem'
-import { createCrawlGhost } from './ghosts/crawlOutOfWall'
+import { loadSkeletonGhostTemplate, createSkeletonGhostInstance } from './ghosts/skeletonGhost'
+import { createGameState, GameStates } from './gameState'
 import { createCaptureSystem } from './captureSystem'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
@@ -37,13 +38,36 @@ setTimeout(() => {
   }
 }, 6000)
 
+// Updates the on-screen hint text, doubling as in-fiction narration for the
+// scanning/glitch story beats (see gameState.js and CHANGES around it).
+const setHintText = (text) => {
+  const el = document.getElementById('hint')
+  if (el) el.textContent = text
+}
+
+let hintFadeTimeout = null
+const onGameStateChange = (state, gameStateApi) => {
+  if (hintFadeTimeout) clearTimeout(hintFadeTimeout)
+
+  if (state === GameStates.SCANNING) {
+    setHintText('Searching for a breach... move slowly around the room.')
+  } else if (state === GameStates.ACTIVE) {
+    setHintText('The breach is open.')
+    hintFadeTimeout = setTimeout(() => setHintText(''), 2800)
+  } else if (state === GameStates.GLITCHING) {
+    setHintText("SIGNAL LOST — something doesn't want you to see this. Recalibrating...")
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Custom Three.js pipeline module.
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
-  let surfaceSampler, scareScheduler, captureSystem
+  let surfaceSampler, scareScheduler, gameState, captureSystem
   let clock
+  let lastTrackingStatus = null
+  let hasLoggedTrackingSample = false
 
   // Small pool of reusable ghost instances rather than creating a new mesh
   // per scare — cheaper, and simple to reason about with only a few ghosts
@@ -56,16 +80,6 @@ const initScenePipelineModule = () => {
   const spawnGhostAt = (point) => {
     const ghost = getIdleGhost()
     if (!ghost) return // all ghosts already active — skip this scare attempt
-    const normal = point.normal || new THREE.Vector3(0, 1, 0)
-    ghost.spawnAt(point.position, normal)
-  }
-
-  // Spawns a SPECIFIC ghost instance (not a random idle pick) at a point —
-  // used for re-finding an entity that fled somewhere after its first
-  // reveal, where identity matters (it has to be the same ghost, so its
-  // capturable flag carries over correctly).
-  const spawnSpecificGhostAt = (ghost, point) => {
-    if (ghost.isActive()) return
     const normal = point.normal || new THREE.Vector3(0, 1, 0)
     ghost.spawnAt(point.position, normal)
   }
@@ -118,62 +132,59 @@ const initScenePipelineModule = () => {
       // window.hauntedVision.flash() for a scripted jump-scare beat.
       window.hauntedVision = hauntedVision
 
-      captureSystem = createCaptureSystem({
-        camera,
-        onCaptureResult: ({ success }) => {
-          if (success) {
-            // Camera flash-bang on a successful capture — longer/brighter
-            // than a scare flash. Shutter-click SFX belongs here too once
-            // spatialAudio.js is wired in (Stage 3+).
-            hauntedVision.flash(600)
+      // Ghost pool: load the real skeleton model ONCE, then clone it per
+      // pool slot (SkeletonUtils.clone — required for skinned meshes, a
+      // plain Object3D.clone() does not correctly duplicate bone bindings).
+      // Loading is async, so the pool simply isn't ready for the first
+      // second or two — fine, since spawning also needs scanned surfaces
+      // first anyway.
+      loadSkeletonGhostTemplate()
+        .then((template) => {
+          for (let i = 0; i < GHOST_POOL_SIZE; i++) {
+            const ghost = createSkeletonGhostInstance(template, {
+              onRevealPeak: () => hauntedVision.flash(450),
+            })
+            scene.add(ghost.mesh)
+            ghostPool.push(ghost)
           }
-          // A failed/late tap (progress not full, or frame lost right as
-          // the player tapped) intentionally gets no flash — only a real
-          // capture or a timeout breakout should feel like a beat.
-        },
-        onTimeout: () => {
-          // Timeout breakout: "it rushes the player at close range" per
-          // story-bible.md — a shorter, sharper flash than a successful
-          // capture, then the ghost's own breakOut() relocates it.
-          hauntedVision.flash(300)
-        },
-      })
-
-      // Ghost pool: each is added to the scene once, hidden, reused per spawn.
-      for (let i = 0; i < GHOST_POOL_SIZE; i++) {
-        const ghost = createCrawlGhost({
-          onRevealPeak: ({ capturable }) => {
-            hauntedVision.flash(450)
-            // Only a re-find (capturable === true) arms the reticle/meter/
-            // timer — a first-ever reveal is scare-only, per
-            // story-bible.md's two-phase rule, and the UI should visibly
-            // show nothing (no reticle fill, no timer) for that case.
-            if (capturable) captureSystem.arm(ghost)
-          },
-          // Called when this ghost needs somewhere to flee to after its
-          // first-ever reveal. Excludes the point it just emerged from so
-          // it doesn't just "flee" back into the same spot.
-          onNeedFleeTarget: () => surfaceSampler.getRandomPointExcluding(ghost.mesh.position, { excludeRadius: 1.0 }),
-          onDespawn: ({ fledTo }) => {
-            if (fledTo) {
-              // This point is now a guaranteed, capturable re-spawn location
-              // for this ghost — hand it to the scare scheduler as a
-              // priority target instead of letting it re-roll fully random.
-              scareScheduler.registerFledTarget(fledTo, ghost)
-            }
-          },
+          debugLog(`Skeleton ghost model loaded — pool of ${GHOST_POOL_SIZE} ready.`)
         })
-        scene.add(ghost.mesh)
-        ghostPool.push(ghost)
-      }
+        .catch((err) => {
+          debugLog(`Failed to load skeleton ghost model: ${err.message || err}`)
+        })
 
       surfaceSampler = createSurfaceSampler()
       scareScheduler = createScareScheduler({
         surfaceSampler,
         spawnGhost: spawnGhostAt,
-        spawnSpecificGhost: spawnSpecificGhostAt,
         flash: hauntedVision.flash,
       })
+      gameState = createGameState({
+        surfaceSampler,
+        hauntedVision,
+        ghostPool,
+        onStateChange: (state) => onGameStateChange(state),
+      })
+      captureSystem = createCaptureSystem({
+        ghostPool,
+        camera,
+        reticleEl: document.getElementById('reticle'),
+        shutterEl: document.getElementById('shutter'),
+        onCapture: (ghost) => {
+          hauntedVision.flash(300)
+          if (ghost.forceDespawn) ghost.forceDespawn()
+          debugLog('Capture!')
+        },
+        onBreakout: (ghost) => {
+          hauntedVision.flash(200)
+          debugLog('Breakout — capture timer ran out.')
+          // Entity still needs its own "rush the player, then re-hide"
+          // behavior (see scene script's BROKEN_OUT state) — not wired yet,
+          // so it just despawns for now rather than looping forever.
+          if (ghost.forceDespawn) ghost.forceDespawn()
+        },
+      })
+
       clock = new THREE.Clock()
 
       window.addEventListener('resize', () => {
@@ -195,9 +206,49 @@ const initScenePipelineModule = () => {
       const delta = clock.getDelta()
 
       surfaceSampler.update()
-      scareScheduler.update(delta, camera.position)
+      gameState.update(delta)
+      // Scares only run once the room-scan story beat has completed — no
+      // ghosts appear during the initial "searching for a breach" phase or
+      // mid-glitch.
+      if (gameState.getState() === GameStates.ACTIVE) {
+        scareScheduler.update(delta, camera.position)
+      }
       ghostPool.forEach((ghost) => ghost.update(delta))
-      captureSystem.update(delta)
+      if (captureSystem) captureSystem.update(delta)
+    },
+
+    // Per-frame CPU-side data from XrController, including SLAM tracking
+    // status. Used to detect when tracking is lost/reset — the most common
+    // real-world trigger being the player walking into a room that hasn't
+    // been scanned yet, which the SLAM tracker usually can't relocalize
+    // against. We fold that moment into the glitch/"entities" story beat
+    // instead of it just silently breaking prop anchoring.
+    //
+    // NOTE: the exact shape of this payload (whether tracking status lands
+    // at processCpuResult.reality.trackingStatus, and what string values it
+    // takes — e.g. 'NORMAL'/'LIMITED'/'NOT_TRACKING') is inferred from 8th
+    // Wall's docs, not verified against a live payload. The debugLog below
+    // prints the first sample it sees — check that on-device and adjust the
+    // wasGood/isBad check below if the real values differ.
+    onProcessCpu: (processCpuResult) => {
+      if (!gameState) return
+      const reality = processCpuResult && processCpuResult.reality
+      if (!reality || !reality.trackingStatus) return
+
+      const status = reality.trackingStatus
+      if (!hasLoggedTrackingSample) {
+        hasLoggedTrackingSample = true
+        debugLog(`First SLAM tracking status sample: ${JSON.stringify({ status, reason: reality.trackingReason })}`)
+      }
+
+      if (status !== lastTrackingStatus) {
+        const wasGood = lastTrackingStatus === 'NORMAL' || lastTrackingStatus === 'TRACKING'
+        const isBad = status !== 'NORMAL' && status !== 'TRACKING'
+        if (wasGood && isBad) {
+          gameState.onTrackingDisrupted()
+        }
+        lastTrackingStatus = status
+      }
     },
 
     // 8th Wall's per-frame lifecycle is:
@@ -209,8 +260,7 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      // Haunted shader temporarily disabled — was making the feed too dark.
-      // if (hauntedVision) hauntedVision.render()
+      if (hauntedVision) hauntedVision.render()
     },
   }
 }
@@ -239,33 +289,6 @@ const onxrloaded = () => {
 }
 
 debugLog(`Page script started. window.XR8 present at script-run time: ${!!window.XR8}`)
-
-// ---------------------------------------------------------------------------
-// Keep the screen from dimming/locking mid-session — the OS has no idea
-// this is an active camera app rather than a static page, so without this
-// its normal screen-sleep timer will fire during play (reported directly
-// from an on-device test). Re-acquires on visibilitychange since the OS
-// releases the lock whenever the tab is backgrounded, e.g. an app-switch.
-// ---------------------------------------------------------------------------
-let wakeLock = null
-const requestWakeLock = async () => {
-  if (!('wakeLock' in navigator)) {
-    debugLog('Screen Wake Lock API not supported on this browser — screen may still time out.')
-    return
-  }
-  try {
-    wakeLock = await navigator.wakeLock.request('screen')
-    wakeLock.addEventListener('release', () => {
-      debugLog('Wake lock released.')
-    })
-  } catch (err) {
-    debugLog(`Wake lock request failed: ${err.message}`)
-  }
-}
-requestWakeLock()
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') requestWakeLock()
-})
 
 // Register the service worker: caches the heavy 8th Wall SLAM engine binary
 // for fast repeat loads, while your own app code stays network-first (see

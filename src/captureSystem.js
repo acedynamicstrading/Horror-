@@ -1,223 +1,137 @@
 // ---------------------------------------------------------------------------
-// Stage 1 (build-roadmap.md) — the capture loop. Owns the reticle UI, the
-// capture progress meter, the capture timer, and the shutter button, and
-// drives the single "armed" ghost's held/forceCapture()/breakOut() calls.
+// The reticle/capture loop from the scene script's "Global Systems" section:
+// frame an entity, hold it centered, its focus meter drains toward capture;
+// run out of captureTimer first and it breaks out instead.
 //
-// Deliberately single-target: only one ghost can be "armed" (in the held
-// state, being timed/aimed-at) at once. Per build-roadmap.md Stage 1, don't
-// generalize to multiple simultaneous capturable entities until this loop
-// feels right in hand on a real device.
+// SIMPLIFICATION (flagged, not hidden): this version treats every active
+// ghost as capturable the moment it's on screen. The story bible's real rule
+// — first-ever reveal is scare-only, only a re-find is capturable — needs
+// persistent per-spawn-point entity memory (does THIS spot's entity have a
+// prior sighting already) that doesn't exist yet. That's a separate, larger
+// piece (touches scareSystem.js's spawn selection + surfaceSampler.js's
+// point identity). This module is written so bolting that on later is just
+// changing what counts as a valid `candidate` below — nothing here has to
+// be rebuilt.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three'
 
-// --- Tunables — retune by feel once this is on a real device. ---------------
-// Angle (degrees) off camera-center that still counts as "directly framed" —
-// used instead of screen-space projection, which goes unstable once the
-// player is closer to the entity than the camera's near-clip plane (the
-// projected NDC position can land outside a screen-space radius even though
-// the entity visually fills the whole screen). Angle-based framing has no
-// such blind spot at close range.
-const FRAME_ANGLE_DEG = 18
-const FRAME_ANGLE_COS = Math.cos((FRAME_ANGLE_DEG * Math.PI) / 180)
-// Seconds of continuous, centered framing needed to fill the capture
-// progress meter from empty to full.
-const PROGRESS_FILL_SECONDS = 2.2
-// Total seconds the player has, from the capturable reveal, before a
-// timeout breakout — regardless of whether they're currently framing it.
-const CAPTURE_TIMER_SECONDS = 7.5
-// Minimum visual step before a DOM style write, to avoid thrashing layout
-// on every single frame for a change too small to see.
-const MIN_VISUAL_DELTA = 0.004
+const CENTER_RADIUS = 0.22 // normalized screen-space distance (0-1) counting as "framed"
+const CAPTURE_TIMER_SECONDS = 9
+const FOCUS_FILL_PER_SECOND = 0.4 // ~2.5s of continuous centered hold to fill
 
-const clamp01 = (v) => Math.max(0, Math.min(1, v))
+const projected = new THREE.Vector3()
 
-const buildUi = () => {
-  const root = document.createElement('div')
-  root.id = 'capture-ui'
-  root.innerHTML = `
-    <div id="reticle">
-      <div id="timer-ring"></div>
-      <div id="progress-ring"></div>
-      <div id="reticle-dot"></div>
-    </div>
-    <button id="shutter" aria-label="Capture"></button>
-  `
-  document.body.appendChild(root)
-
-  const style = document.createElement('style')
-  style.textContent = `
-    #capture-ui { position: absolute; inset: 0; pointer-events: none; }
-    #reticle {
-      position: absolute; top: 50%; left: 50%; width: 84px; height: 84px;
-      transform: translate(-50%, -50%);
-      opacity: 0.75; transition: opacity 0.2s ease;
-    }
-    #reticle.armed { opacity: 1; }
-    #timer-ring, #progress-ring {
-      position: absolute; inset: 0; border-radius: 50%;
-    }
-    /* Timer ring: outer, thins (shrinks) as the capture timer runs out. */
-    #timer-ring {
-      border: 2px solid rgba(230, 240, 240, 0.55);
-      transform: scale(1);
-      transition: transform 0.1s linear, opacity 0.2s ease;
-      opacity: 0;
-    }
-    #reticle.armed #timer-ring { opacity: 1; }
-    /* Progress ring: inner, fills via conic-gradient as focus holds. */
-    #progress-ring {
-      inset: 10px;
-      background: conic-gradient(rgba(210, 235, 235, 0.9) 0deg, rgba(210, 235, 235, 0.9) 0deg, transparent 0deg);
-      opacity: 0;
-      transition: opacity 0.2s ease;
-    }
-    #reticle.armed #progress-ring { opacity: 1; }
-    #reticle-dot {
-      position: absolute; top: 50%; left: 50%; width: 6px; height: 6px;
-      margin: -3px; border-radius: 50%; background: rgba(230, 240, 240, 0.9);
-      box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
-    }
-    #reticle.framed #reticle-dot { background: #fff; }
-    #shutter {
-      position: absolute; left: 50%; bottom: 36px; transform: translateX(-50%);
-      width: 68px; height: 68px; border-radius: 50%;
-      background: rgba(20, 24, 24, 0.55); border: 3px solid rgba(230, 240, 240, 0.75);
-      pointer-events: auto; opacity: 0.45; transition: opacity 0.2s ease, transform 0.1s ease;
-    }
-    #shutter.ready { opacity: 1; border-color: #fff; }
-    #shutter:active { transform: translateX(-50%) scale(0.92); }
-  `
-  document.head.appendChild(style)
-
-  return {
-    reticle: root.querySelector('#reticle'),
-    timerRing: root.querySelector('#timer-ring'),
-    progressRing: root.querySelector('#progress-ring'),
-    shutter: root.querySelector('#shutter'),
-  }
+// How close a world point projects to screen center, as a 0 (dead-center) to
+// 1+ (off screen) normalized value. Also returns null if it's behind camera.
+const screenDistanceFromCenter = (worldPos, camera) => {
+  projected.copy(worldPos).project(camera)
+  if (projected.z > 1) return null // behind the camera
+  return { dist: Math.hypot(projected.x, projected.y), ndcX: projected.x, ndcY: projected.y }
 }
 
-// onCaptureResult: ({ success: boolean }) => void — fires on both a
-// successful capture and a failed/late shutter tap, so app.js can drive
-// audio (spatialAudio.js's shutter-click/flash-bang once wired) without
-// this module knowing anything about sound.
-export const createCaptureSystem = ({ camera, onCaptureResult, onTimeout }) => {
-  const ui = buildUi()
+export const createCaptureSystem = ({ ghostPool, camera, reticleEl, shutterEl, onCapture, onBreakout }) => {
+  const ringTimer = reticleEl.querySelector('.ring-timer')
+  const ringFocus = reticleEl.querySelector('.ring-focus')
+  const TIMER_CIRC = 2 * Math.PI * 28
+  const FOCUS_CIRC = 2 * Math.PI * 21
+  ringTimer.style.strokeDasharray = `${TIMER_CIRC}`
+  ringFocus.style.strokeDasharray = `${FOCUS_CIRC}`
 
-  let armedGhost = null
-  let progress = 0 // 0..1
-  let timeRemaining = 0
-  let lastFramed = false
-  let lastProgressDrawn = -1
-  let lastTimerDrawn = -1
+  let target = null // the ghost instance currently framed, or null
+  let captureTimer = 0
+  let focusMeter = 0
 
-  const _forwardVec = new THREE.Vector3()
-  const _toTargetVec = new THREE.Vector3()
-  const _camPosVec = new THREE.Vector3()
-  const _targetPosVec = new THREE.Vector3()
-
-  const isFramed = (ghost) => {
-    if (!ghost || !ghost.isActive()) return false
-    camera.getWorldDirection(_forwardVec) // camera-forward, unit length
-    camera.getWorldPosition(_camPosVec)
-    ghost.mesh.getWorldPosition(_targetPosVec)
-    _toTargetVec.copy(_targetPosVec).sub(_camPosVec)
-    const dist = _toTargetVec.length()
-    if (dist < 1e-4) return true // camera is essentially ON the entity — trivially framed
-    _toTargetVec.divideScalar(dist) // normalize
-    return _forwardVec.dot(_toTargetVec) >= FRAME_ANGLE_COS
+  const resetTargetState = () => {
+    captureTimer = CAPTURE_TIMER_SECONDS
+    focusMeter = 0
   }
 
-  // Call this from the ghost's onRevealPeak callback when capturable===true
-  // — arms the capture system on this specific ghost instance.
-  const arm = (ghost) => {
-    armedGhost = ghost
-    progress = 0
-    timeRemaining = CAPTURE_TIMER_SECONDS
-    ui.reticle.classList.add('armed')
-  }
+  const pickTarget = () => {
+    let best = null
+    let bestDist = CENTER_RADIUS
+    let bestScreen = null
 
-  const disarm = () => {
-    armedGhost = null
-    ui.reticle.classList.remove('armed', 'framed')
-    ui.shutter.classList.remove('ready')
-    lastProgressDrawn = -1
-    lastTimerDrawn = -1
+    ghostPool.forEach((ghost) => {
+      if (!ghost.isActive()) return
+      const screen = screenDistanceFromCenter(ghost.mesh.position, camera)
+      if (!screen) return
+      if (screen.dist < bestDist) {
+        best = ghost
+        bestDist = screen.dist
+        bestScreen = screen
+      }
+    })
+
+    return best ? { ghost: best, screen: bestScreen } : null
   }
 
   const update = (delta) => {
-    if (!armedGhost) return
+    const found = pickTarget()
 
-    // Ghost resolved itself some other way (e.g. despawned externally) —
-    // just clear our state, don't force anything.
-    if (!armedGhost.isHeld()) {
-      disarm()
+    if (found && found.ghost !== target) {
+      target = found.ghost
+      resetTargetState()
+    } else if (!found && target) {
+      target = null
+    }
+
+    if (!target) {
+      reticleEl.classList.remove('visible')
+      shutterEl.classList.remove('ready')
       return
     }
 
-    const framed = isFramed(armedGhost)
-    if (framed !== lastFramed) {
-      ui.reticle.classList.toggle('framed', framed)
-      lastFramed = framed
+    // Re-run projection for positioning even when target didn't change this
+    // frame (it's moving).
+    const screen = screenDistanceFromCenter(target.mesh.position, camera)
+    if (!screen) {
+      target = null
+      reticleEl.classList.remove('visible')
+      return
     }
 
-    if (framed) {
-      progress = clamp01(progress + delta / PROGRESS_FILL_SECONDS)
+    const px = (screen.ndcX * 0.5 + 0.5) * window.innerWidth
+    const py = (-screen.ndcY * 0.5 + 0.5) * window.innerHeight
+    reticleEl.style.transform = `translate(${px}px, ${py}px)`
+    reticleEl.classList.add('visible')
+
+    captureTimer -= delta
+    const timerProgress = Math.max(0, captureTimer / CAPTURE_TIMER_SECONDS) // 1 -> 0
+    ringTimer.style.strokeDashoffset = `${TIMER_CIRC * (1 - timerProgress)}`
+
+    if (screen.dist < CENTER_RADIUS * 0.5) {
+      // Well-centered: fill focus. Persistence rule from the design doc —
+      // losing and re-finding frame pauses the meter, never resets it —
+      // falls out naturally here since focusMeter only ever moves while
+      // `target` stays the same ghost instance.
+      focusMeter = Math.min(1, focusMeter + FOCUS_FILL_PER_SECOND * delta)
     }
-    // Progress deliberately does NOT decay when frame is lost — only holds.
+    ringFocus.style.strokeDashoffset = `${FOCUS_CIRC * (1 - focusMeter)}`
 
-    timeRemaining -= delta
+    shutterEl.classList.toggle('ready', focusMeter >= 1)
 
-    if (Math.abs(progress - lastProgressDrawn) > MIN_VISUAL_DELTA) {
-      ui.progressRing.style.background =
-        `conic-gradient(rgba(210, 235, 235, 0.9) ${progress * 360}deg, transparent ${progress * 360}deg)`
-      lastProgressDrawn = progress
-    }
-    ui.shutter.classList.toggle('ready', progress >= 1)
-
-    const timerFrac = clamp01(timeRemaining / CAPTURE_TIMER_SECONDS)
-    if (Math.abs(timerFrac - lastTimerDrawn) > MIN_VISUAL_DELTA) {
-      // "Thinning ring" — scales down as time runs out, per story-bible.md's
-      // "visible as a thinning ring around the reticle, not a number."
-      ui.timerRing.style.transform = `scale(${0.4 + 0.6 * timerFrac})`
-      lastTimerDrawn = timerFrac
-    }
-
-    if (timeRemaining <= 0) {
-      const ghost = armedGhost
-      disarm()
-      const relocated = ghost.breakOut()
-      if (onTimeout) onTimeout({ relocated })
-      // If breakOut() couldn't find anywhere to send it (room barely
-      // scanned), it just stays held — leave it armed and try again next
-      // frame rather than losing track of it entirely.
-      if (!relocated) arm(ghost)
+    if (captureTimer <= 0) {
+      if (onBreakout) onBreakout(target)
+      target = null
+      reticleEl.classList.remove('visible')
     }
   }
 
   const attemptCapture = () => {
-    if (!armedGhost) return
-    const framed = isFramed(armedGhost)
-    if (progress >= 1 && framed) {
-      const ghost = armedGhost
-      const camPos = new THREE.Vector3()
-      camera.getWorldPosition(camPos)
-      const captured = ghost.forceCapture(camPos)
-      disarm()
-      if (onCaptureResult) onCaptureResult({ success: captured })
-    } else {
-      // Tapped too early or lost frame right at the moment of the tap —
-      // not a timeout, just a whiff. No state change, just feedback.
-      if (onCaptureResult) onCaptureResult({ success: false })
-    }
+    if (!target || focusMeter < 1) return false
+    if (onCapture) onCapture(target)
+    target = null
+    reticleEl.classList.remove('visible')
+    return true
   }
 
-  ui.shutter.addEventListener('touchstart', (e) => {
+  shutterEl.addEventListener('touchstart', (e) => {
     e.preventDefault()
     attemptCapture()
   })
-  ui.shutter.addEventListener('click', attemptCapture)
+  // Fallback for desktop testing.
+  shutterEl.addEventListener('click', attemptCapture)
 
-  return { arm, update, attemptCapture }
+  return { update }
 }

@@ -22,14 +22,6 @@ import * as THREE from 'three'
 const MAX_POOL_SIZE = 40
 const MIN_POINT_SPACING = 0.35 // meters — dedup threshold
 const SAMPLES_PER_TICK = 1 // keep cheap; called every onUpdate
-// Heuristic-only "furniture" detection: 8th Wall's hit-test gives geometry,
-// not object recognition, so there's no real way to know "that's a table."
-// Proxy: a horizontal surface (floor-like normal) that sits meaningfully
-// ABOVE the lowest floor points sampled so far is probably a tabletop,
-// shelf, or seat cushion, not the actual floor. Good enough for "hide
-// somewhere off the ground" without needing real semantic understanding —
-// tune FURNITURE_MIN_HEIGHT down if it's under-triggering in a real room.
-const FURNITURE_MIN_HEIGHT = 0.18 // meters above the lowest known floor point
 
 const up = new THREE.Vector3(0, 1, 0)
 const tmpNormal = new THREE.Vector3()
@@ -53,8 +45,7 @@ const isFarEnoughFromPool = (pool, position) =>
   pool.every((p) => p.position.distanceTo(position) > MIN_POINT_SPACING)
 
 export const createSurfaceSampler = () => {
-  const pools = { wall: [], floor: [], furniture: [], other: [] }
-  let lowestFloorY = null // updated as floor points come in
+  const pools = { wall: [], floor: [], other: [] }
 
   const sampleOnce = () => {
     if (!window.XR8 || !window.XR8.XrController) return
@@ -67,19 +58,7 @@ export const createSurfaceSampler = () => {
 
     const hit = results[0]
     const position = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
-    let type = classifySurface(hit)
-
-    // Reclassify: a "floor-orientation" point sitting well above the
-    // lowest floor point we've seen is more likely a tabletop/shelf/seat
-    // than actual floor — bucket it as furniture instead.
-    if (type === 'floor') {
-      if (lowestFloorY === null || position.y < lowestFloorY) {
-        lowestFloorY = position.y
-      } else if (position.y - lowestFloorY > FURNITURE_MIN_HEIGHT) {
-        type = 'furniture'
-      }
-    }
-
+    const type = classifySurface(hit)
     const pool = pools[type]
 
     if (pool.length >= MAX_POOL_SIZE) return
@@ -103,7 +82,7 @@ export const createSurfaceSampler = () => {
   const getRandomPoint = (type = 'any') => {
     let pool
     if (type === 'any') {
-      pool = [...pools.wall, ...pools.floor, ...pools.furniture, ...pools.other]
+      pool = [...pools.wall, ...pools.floor, ...pools.other]
     } else {
       pool = pools[type]
     }
@@ -111,28 +90,20 @@ export const createSurfaceSampler = () => {
     return pool[Math.floor(Math.random() * pool.length)]
   }
 
-  // Like getRandomPoint, but excludes any point within excludeRadius of
-  // excludePosition — used to pick a flee target that's meaningfully
-  // different from where an entity just was, not right next to it.
-  const getRandomPointExcluding = (excludePosition, { type = 'any', excludeRadius = 1.0 } = {}) => {
-    let pool
-    if (type === 'any') {
-      pool = [...pools.wall, ...pools.floor, ...pools.furniture, ...pools.other]
-    } else {
-      pool = pools[type]
-    }
-    if (!pool || pool.length === 0) return null
-    const candidates = pool.filter((p) => p.position.distanceTo(excludePosition) > excludeRadius)
-    if (candidates.length === 0) return null
-    return candidates[Math.floor(Math.random() * candidates.length)]
-  }
-
   const poolSizes = () => ({
     wall: pools.wall.length,
     floor: pools.floor.length,
-    furniture: pools.furniture.length,
     other: pools.other.length,
   })
 
-  return { update, getRandomPoint, getRandomPointExcluding, poolSizes }
+  // Clears all collected points — called when SLAM tracking appears to have
+  // reset (e.g. the player walked into a new, unscanned room), since the old
+  // points may no longer correspond to real anchored positions.
+  const reset = () => {
+    pools.wall.length = 0
+    pools.floor.length = 0
+    pools.other.length = 0
+  }
+
+  return { update, getRandomPoint, poolSizes, reset }
 }

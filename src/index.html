@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>AR Haunted House — Starter</title>
   <link rel="manifest" href="./manifest.json">
+  <link rel="icon" href="./assets/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./assets/icons/icon-192.png">
   <meta name="theme-color" content="#000000">
 
   <!-- 8th Wall Engine. "slam" chunk enables world tracking / plane detection. -->
@@ -57,11 +59,86 @@
       z-index: 9999;
       display: none;
     }
+
+    /* --- Capture HUD --- */
+    /* Reticle: sits over whatever entity is currently framed. Positioned via
+       inline transform each frame from captureSystem.js's screen-space
+       projection — this element itself never moves via CSS/layout. */
+    #reticle {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 64px;
+      height: 64px;
+      margin: -32px 0 0 -32px; /* center on its own projected x/y */
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    #reticle.visible { opacity: 1; }
+    #reticle svg { width: 100%; height: 100%; overflow: visible; }
+    /* Static outer ring — just marks "this is framed" */
+    #reticle .ring-outer {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.55);
+      stroke-width: 2;
+    }
+    /* Thinning countdown ring for captureTimer — drawn via stroke-dashoffset,
+       set from JS each frame (see captureSystem.js). Full circumference =
+       full time remaining. */
+    #reticle .ring-timer {
+      fill: none;
+      stroke: rgba(255, 60, 60, 0.9);
+      stroke-width: 3;
+      stroke-linecap: round;
+      transform: rotate(-90deg);
+      transform-origin: center;
+    }
+    /* Filling focus-progress ring — inner, fills as the meter drains toward
+       capture. */
+    #reticle .ring-focus {
+      fill: none;
+      stroke: rgba(120, 220, 255, 0.9);
+      stroke-width: 3;
+      stroke-linecap: round;
+      transform: rotate(-90deg);
+      transform-origin: center;
+    }
+
+    /* Shutter: fixed thumb-operated button, bottom-center, independent of
+       any world-space touch handling. */
+    #shutter {
+      position: absolute;
+      bottom: 36px;
+      left: 50%;
+      width: 72px;
+      height: 72px;
+      margin-left: -36px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.85);
+      background: rgba(255, 255, 255, 0.15);
+      -webkit-tap-highlight-color: transparent;
+    }
+    #shutter.ready {
+      background: rgba(120, 220, 255, 0.55);
+      box-shadow: 0 0 18px rgba(120, 220, 255, 0.7);
+    }
+    #shutter:active { transform: scale(0.92); }
   </style>
 </head>
 <body>
   <canvas id="camerafeed"></canvas>
-  <div id="hint">Move your phone slowly to scan the room...</div>
+  <div id="hint">Searching for a breach... move slowly around the room.</div>
+
+  <div id="reticle">
+    <svg viewBox="0 0 64 64">
+      <circle class="ring-outer" cx="32" cy="32" r="28" />
+      <circle class="ring-timer" cx="32" cy="32" r="28" />
+      <circle class="ring-focus" cx="32" cy="32" r="21" />
+    </svg>
+  </div>
+  <button id="shutter" aria-label="Capture"></button>
+
   <div id="debug"></div>
 </body>
 </html>
