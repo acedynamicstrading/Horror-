@@ -240,6 +240,33 @@ const onxrloaded = () => {
 
 debugLog(`Page script started. window.XR8 present at script-run time: ${!!window.XR8}`)
 
+// ---------------------------------------------------------------------------
+// Keep the screen from dimming/locking mid-session — the OS has no idea
+// this is an active camera app rather than a static page, so without this
+// its normal screen-sleep timer will fire during play (reported directly
+// from an on-device test). Re-acquires on visibilitychange since the OS
+// releases the lock whenever the tab is backgrounded, e.g. an app-switch.
+// ---------------------------------------------------------------------------
+let wakeLock = null
+const requestWakeLock = async () => {
+  if (!('wakeLock' in navigator)) {
+    debugLog('Screen Wake Lock API not supported on this browser — screen may still time out.')
+    return
+  }
+  try {
+    wakeLock = await navigator.wakeLock.request('screen')
+    wakeLock.addEventListener('release', () => {
+      debugLog('Wake lock released.')
+    })
+  } catch (err) {
+    debugLog(`Wake lock request failed: ${err.message}`)
+  }
+}
+requestWakeLock()
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock()
+})
+
 // Register the service worker: caches the heavy 8th Wall SLAM engine binary
 // for fast repeat loads, while your own app code stays network-first (see
 // src/sw.js for why — this keeps development from ever showing stale code).

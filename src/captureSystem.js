@@ -12,10 +12,14 @@
 import * as THREE from 'three'
 
 // --- Tunables — retune by feel once this is on a real device. ---------------
-// NDC (-1..1) radius around screen-center that counts as "framed." Small
-// values demand precise aim; this starting point favors readability over
-// difficulty until playtesting says otherwise.
-const FRAME_RADIUS = 0.16
+// Angle (degrees) off camera-center that still counts as "directly framed" —
+// used instead of screen-space projection, which goes unstable once the
+// player is closer to the entity than the camera's near-clip plane (the
+// projected NDC position can land outside a screen-space radius even though
+// the entity visually fills the whole screen). Angle-based framing has no
+// such blind spot at close range.
+const FRAME_ANGLE_DEG = 18
+const FRAME_ANGLE_COS = Math.cos((FRAME_ANGLE_DEG * Math.PI) / 180)
 // Seconds of continuous, centered framing needed to fill the capture
 // progress meter from empty to full.
 const PROGRESS_FILL_SECONDS = 2.2
@@ -47,7 +51,7 @@ const buildUi = () => {
     #reticle {
       position: absolute; top: 50%; left: 50%; width: 84px; height: 84px;
       transform: translate(-50%, -50%);
-      opacity: 0.55; transition: opacity 0.2s ease;
+      opacity: 0.75; transition: opacity 0.2s ease;
     }
     #reticle.armed { opacity: 1; }
     #timer-ring, #progress-ring {
@@ -70,8 +74,9 @@ const buildUi = () => {
     }
     #reticle.armed #progress-ring { opacity: 1; }
     #reticle-dot {
-      position: absolute; top: 50%; left: 50%; width: 4px; height: 4px;
-      margin: -2px; border-radius: 50%; background: rgba(230, 240, 240, 0.85);
+      position: absolute; top: 50%; left: 50%; width: 6px; height: 6px;
+      margin: -3px; border-radius: 50%; background: rgba(230, 240, 240, 0.9);
+      box-shadow: 0 0 3px rgba(0, 0, 0, 0.8);
     }
     #reticle.framed #reticle-dot { background: #fff; }
     #shutter {
@@ -107,19 +112,21 @@ export const createCaptureSystem = ({ camera, onCaptureResult, onTimeout }) => {
   let lastProgressDrawn = -1
   let lastTimerDrawn = -1
 
-  const _ndcOf = (mesh) => {
-    const v = new THREE.Vector3()
-    mesh.getWorldPosition(v)
-    v.project(camera)
-    return v
-  }
+  const _forwardVec = new THREE.Vector3()
+  const _toTargetVec = new THREE.Vector3()
+  const _camPosVec = new THREE.Vector3()
+  const _targetPosVec = new THREE.Vector3()
 
   const isFramed = (ghost) => {
     if (!ghost || !ghost.isActive()) return false
-    const ndc = _ndcOf(ghost.mesh)
-    // Behind the camera — never "framed" even if the x/y happen to line up.
-    if (ndc.z > 1) return false
-    return Math.hypot(ndc.x, ndc.y) <= FRAME_RADIUS
+    camera.getWorldDirection(_forwardVec) // camera-forward, unit length
+    camera.getWorldPosition(_camPosVec)
+    ghost.mesh.getWorldPosition(_targetPosVec)
+    _toTargetVec.copy(_targetPosVec).sub(_camPosVec)
+    const dist = _toTargetVec.length()
+    if (dist < 1e-4) return true // camera is essentially ON the entity — trivially framed
+    _toTargetVec.divideScalar(dist) // normalize
+    return _forwardVec.dot(_toTargetVec) >= FRAME_ANGLE_COS
   }
 
   // Call this from the ghost's onRevealPeak callback when capturable===true
