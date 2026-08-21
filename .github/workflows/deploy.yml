@@ -29,6 +29,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Assets (3D models, textures) are uploaded to the repo as a single
+      # zip (assets.zip at the repo root) since mobile GitHub's web upload
+      # UI can't reliably create nested folders. This unpacks it into
+      # src/assets/ right before the build, overwriting whatever's there.
+      # If assets.zip isn't present, this step just does nothing — no
+      # error — so it's safe to leave in permanently.
+      - name: Unpack assets.zip if present
+        run: |
+          if [ -f assets.zip ]; then
+            unzip -o assets.zip -d src/assets
+          fi
+
       - name: Build
         run: npm run build
 
