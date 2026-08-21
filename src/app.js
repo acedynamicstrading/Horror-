@@ -260,7 +260,12 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      if (hauntedVision) hauntedVision.render()
+      // Haunted shader temporarily disabled — was reading as too dark.
+      // Flip this back to `if (hauntedVision) hauntedVision.render()` to
+      // re-enable the vignette/desaturation/glitch/flash effect. Note:
+      // flash()/portalOpen()/setGlitch() calls elsewhere still run fine —
+      // they just have no visible effect while render() itself is skipped.
+      // if (hauntedVision) hauntedVision.render()
     },
   }
 }
