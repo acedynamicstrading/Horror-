@@ -3,7 +3,7 @@ import { createHauntedVision } from './hauntedShader'
 import { createSurfaceSampler } from './surfaceSampler'
 import { createScareScheduler } from './scareSystem'
 import { createCrawlGhost } from './ghosts/crawlOutOfWall'
-import { createHeldPistol } from './heldPistol'
+import { createCaptureSystem } from './captureSystem'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -42,7 +42,7 @@ setTimeout(() => {
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
-  let surfaceSampler, scareScheduler, heldPistol
+  let surfaceSampler, scareScheduler, captureSystem
   let clock
 
   // Small pool of reusable ghost instances rather than creating a new mesh
@@ -56,6 +56,16 @@ const initScenePipelineModule = () => {
   const spawnGhostAt = (point) => {
     const ghost = getIdleGhost()
     if (!ghost) return // all ghosts already active — skip this scare attempt
+    const normal = point.normal || new THREE.Vector3(0, 1, 0)
+    ghost.spawnAt(point.position, normal)
+  }
+
+  // Spawns a SPECIFIC ghost instance (not a random idle pick) at a point —
+  // used for re-finding an entity that fled somewhere after its first
+  // reveal, where identity matters (it has to be the same ghost, so its
+  // capturable flag carries over correctly).
+  const spawnSpecificGhostAt = (ghost, point) => {
+    if (ghost.isActive()) return
     const normal = point.normal || new THREE.Vector3(0, 1, 0)
     ghost.spawnAt(point.position, normal)
   }
@@ -108,28 +118,60 @@ const initScenePipelineModule = () => {
       // window.hauntedVision.flash() for a scripted jump-scare beat.
       window.hauntedVision = hauntedVision
 
+      captureSystem = createCaptureSystem({
+        camera,
+        onCaptureResult: ({ success }) => {
+          if (success) {
+            // Camera flash-bang on a successful capture — longer/brighter
+            // than a scare flash. Shutter-click SFX belongs here too once
+            // spatialAudio.js is wired in (Stage 3+).
+            hauntedVision.flash(600)
+          }
+          // A failed/late tap (progress not full, or frame lost right as
+          // the player tapped) intentionally gets no flash — only a real
+          // capture or a timeout breakout should feel like a beat.
+        },
+        onTimeout: () => {
+          // Timeout breakout: "it rushes the player at close range" per
+          // story-bible.md — a shorter, sharper flash than a successful
+          // capture, then the ghost's own breakOut() relocates it.
+          hauntedVision.flash(300)
+        },
+      })
+
       // Ghost pool: each is added to the scene once, hidden, reused per spawn.
       for (let i = 0; i < GHOST_POOL_SIZE; i++) {
         const ghost = createCrawlGhost({
-          onRevealPeak: () => hauntedVision.flash(450),
+          onRevealPeak: ({ capturable }) => {
+            hauntedVision.flash(450)
+            // Only a re-find (capturable === true) arms the reticle/meter/
+            // timer — a first-ever reveal is scare-only, per
+            // story-bible.md's two-phase rule, and the UI should visibly
+            // show nothing (no reticle fill, no timer) for that case.
+            if (capturable) captureSystem.arm(ghost)
+          },
+          // Called when this ghost needs somewhere to flee to after its
+          // first-ever reveal. Excludes the point it just emerged from so
+          // it doesn't just "flee" back into the same spot.
+          onNeedFleeTarget: () => surfaceSampler.getRandomPointExcluding(ghost.mesh.position, { excludeRadius: 1.0 }),
+          onDespawn: ({ fledTo }) => {
+            if (fledTo) {
+              // This point is now a guaranteed, capturable re-spawn location
+              // for this ghost — hand it to the scare scheduler as a
+              // priority target instead of letting it re-roll fully random.
+              scareScheduler.registerFledTarget(fledTo, ghost)
+            }
+          },
         })
         scene.add(ghost.mesh)
         ghostPool.push(ghost)
       }
 
-      // Parented to the camera, once `camera` exists — see src/heldPistol.js
-      // for why parenting (not world placement) makes it track the view
-      // like a held prop instead of a fixed AR object.
-      heldPistol = createHeldPistol({ camera })
-
-      canvas.addEventListener('touchstart', () => {
-        if (heldPistol) heldPistol.fire()
-      })
-
       surfaceSampler = createSurfaceSampler()
       scareScheduler = createScareScheduler({
         surfaceSampler,
         spawnGhost: spawnGhostAt,
+        spawnSpecificGhost: spawnSpecificGhostAt,
         flash: hauntedVision.flash,
       })
       clock = new THREE.Clock()
@@ -155,7 +197,7 @@ const initScenePipelineModule = () => {
       surfaceSampler.update()
       scareScheduler.update(delta, camera.position)
       ghostPool.forEach((ghost) => ghost.update(delta))
-      if (heldPistol) heldPistol.update()
+      captureSystem.update(delta)
     },
 
     // 8th Wall's per-frame lifecycle is:

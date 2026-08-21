@@ -20,10 +20,16 @@ const LONG_DORMANCY_MULTIPLIER = 2.2
 const PROXIMITY_FIRE_CHANCE = 0.35
 const PROXIMITY_CHECK_INTERVAL = 0.4 // seconds between rolls, not every frame
 
-export const createScareScheduler = ({ surfaceSampler, spawnGhost, flash, getCameraPosition }) => {
+export const createScareScheduler = ({ surfaceSampler, spawnGhost, spawnSpecificGhost, flash, getCameraPosition }) => {
   let nextTimerScareIn = randomBetween(TIMER_MIN, TIMER_MAX)
   let proximityCheckClock = 0
   const proximityWatchers = [] // { point, radius, lastRollAt }
+  // Fled entities waiting to be re-found — unlike proximityWatchers, each of
+  // these is tied to a SPECIFIC ghost instance (the one that fled there),
+  // not a random pool pick, and firing is guaranteed once in range rather
+  // than a probability roll — this is the player's second, capturable
+  // sighting, not a random ambient scare, so it shouldn't be able to whiff.
+  const fledWatchers = [] // { point, ghost, radius }
 
   const attemptSpawn = (preferredType = 'any') => {
     const point = surfaceSampler.getRandomPoint(preferredType)
@@ -50,12 +56,34 @@ export const createScareScheduler = ({ surfaceSampler, spawnGhost, flash, getCam
     })
   }
 
+  // Called by app.js when a ghost flees after its first-ever reveal — this
+  // is what makes "go find it somewhere else" an actual, guaranteed re-find
+  // rather than hoping a fully random spawn happens to pick the same ghost.
+  const registerFledTarget = (point, ghost) => {
+    fledWatchers.push({
+      point,
+      ghost,
+      radius: randomBetween(0.7, 1.4), // tighter than ambient proximity — this is a deliberate "search" beat
+    })
+  }
+
   const update = (delta, cameraPosition) => {
     // --- Timer-based path ---
     nextTimerScareIn -= delta
     if (nextTimerScareIn <= 0) {
       attemptSpawn('any')
       scheduleNextTimerScare()
+    }
+
+    // --- Fled-entity re-find path (guaranteed, not probabilistic) ---
+    for (let i = fledWatchers.length - 1; i >= 0; i--) {
+      const watcher = fledWatchers[i]
+      if (watcher.ghost.isActive()) continue // already mid-encounter elsewhere, skip
+      const dist = cameraPosition.distanceTo(watcher.point.position)
+      if (dist <= watcher.radius) {
+        spawnSpecificGhost(watcher.ghost, watcher.point)
+        fledWatchers.splice(i, 1) // one-shot — this hiding spot is used up once found
+      }
     }
 
     // --- Proximity-based path (throttled, probabilistic) ---
@@ -77,5 +105,5 @@ export const createScareScheduler = ({ surfaceSampler, spawnGhost, flash, getCam
     }
   }
 
-  return { update, watchProximity, attemptSpawn }
+  return { update, watchProximity, registerFledTarget, attemptSpawn }
 }
