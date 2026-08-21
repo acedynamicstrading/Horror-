@@ -70,6 +70,7 @@ const initScenePipelineModule = () => {
   let lastTrackingStatus = null
   let hasLoggedTrackingSample = false
   let hasLoggedRawProcessCpu = false
+  let hasLoggedRealitySample = false
 
   // Live lighting estimation — references to the two fixed-intensity lights
   // created in onStart, so onProcessCpu can drive their brightness/warmth
@@ -239,9 +240,75 @@ const initScenePipelineModule = () => {
     // Game-logic tick: scan for surfaces, decide/roll scares, advance any
     // active ghost's emergence animation. Kept separate from onRender, which
     // is drawing-only.
-    onUpdate: () => {
+    //
+    // Also where lighting/worldPoints/trackingStatus now actually get read —
+    // moved here from onProcessCpu (see the comment on that hook below for
+    // why). onUpdate receives { processCpuResult } as one of its arguments;
+    // that's where XR8.XrController's `reality` output actually lands.
+    onUpdate: ({ processCpuResult }) => {
       if (!surfaceSampler) return
       const delta = clock.getDelta()
+
+      const reality = processCpuResult && processCpuResult.reality
+      if (reality) {
+        if (!hasLoggedRealitySample) {
+          hasLoggedRealitySample = true
+          debugLog(`First reality sample (from onUpdate): keys=${JSON.stringify(Object.keys(reality))}`)
+        }
+
+        // ---- lighting estimation -> drive the two scene lights live ----
+        // Field names still aren't pinned down from public docs — logs the
+        // first real lighting sample and tries several plausible names
+        // defensively, same caution as before. Simplify once confirmed.
+        if (reality.lighting) {
+          if (!hasLoggedLightingSample) {
+            hasLoggedLightingSample = true
+            debugLog(`First lighting sample: ${JSON.stringify(reality.lighting)}`)
+          }
+          const L = reality.lighting
+          let raw = null
+          if (typeof L.intensity === 'number') raw = L.intensity
+          else if (typeof L.ambientIntensity === 'number') raw = L.ambientIntensity
+          else if (typeof L.brightness === 'number') raw = L.brightness
+          else if (typeof L.exposure === 'number') raw = 1 / (1 + Math.exp(-(L.exposure - 1)))
+          else if (typeof L.ev === 'number') raw = Math.min(1, Math.max(0, (L.ev + 3) / 10))
+
+          if (raw != null) {
+            const target = Math.min(1, Math.max(0.08, raw))
+            smoothedLightLevel += (target - smoothedLightLevel) * 0.08
+            if (ambientLight) ambientLight.intensity = 0.25 + smoothedLightLevel * 0.6
+            if (directionalLight) directionalLight.intensity = 0.3 + smoothedLightLevel * 0.9
+          }
+        }
+
+        // ---- world points -> feed the scan-progress hint text ----
+        if (Array.isArray(reality.worldPoints)) {
+          if (!hasLoggedWorldPointsSample && reality.worldPoints.length > 0) {
+            hasLoggedWorldPointsSample = true
+            debugLog(`First worldPoints sample: ${reality.worldPoints.length} points. Example: ${JSON.stringify(reality.worldPoints[0])}`)
+          }
+          latestWorldPointCount = reality.worldPoints.length
+        }
+
+        // ---- tracking status ----
+        if (reality.trackingStatus) {
+          const status = reality.trackingStatus
+          if (!hasLoggedTrackingSample) {
+            hasLoggedTrackingSample = true
+            debugLog(`First SLAM tracking status sample: ${JSON.stringify({ status, reason: reality.trackingReason })}`)
+          }
+          if (status !== lastTrackingStatus) {
+            const wasGood = lastTrackingStatus === 'NORMAL' || lastTrackingStatus === 'TRACKING'
+            const isBad = status !== 'NORMAL' && status !== 'TRACKING'
+            if (wasGood && isBad) gameState.onTrackingDisrupted()
+            lastTrackingStatus = status
+          }
+        }
+      } else if (!hasLoggedRealitySample) {
+        hasLoggedRealitySample = true
+        debugLog('onUpdate fired but processCpuResult.reality is still absent — see next message for raw processCpuResult keys.')
+        debugLog(`processCpuResult top-level keys: ${JSON.stringify(processCpuResult ? Object.keys(processCpuResult) : null)}`)
+      }
 
       surfaceSampler.update()
       gameState.update(delta)
@@ -265,100 +332,21 @@ const initScenePipelineModule = () => {
     },
 
     // Per-frame CPU-side data from XrController, including SLAM tracking
-    // status. Used to detect when tracking is lost/reset — the most common
-    // real-world trigger being the player walking into a room that hasn't
-    // been scanned yet, which the SLAM tracker usually can't relocalize
-    // against. We fold that moment into the glitch/"entities" story beat
-    // instead of it just silently breaking prop anchoring.
-    //
-    // NOTE: the exact shape of this payload (whether tracking status lands
-    // at processCpuResult.reality.trackingStatus, and what string values it
-    // takes — e.g. 'NORMAL'/'LIMITED'/'NOT_TRACKING') is inferred from 8th
-    // Wall's docs, not verified against a live payload. The debugLog below
-    // prints the first sample it sees — check that on-device and adjust the
-    // wasGood/isBad check below if the real values differ.
+    // status, lighting estimation, and the world-point cloud. IMPORTANT: this
+    // data does NOT live on onProcessCpu's own argument — that argument is
+    // the INPUT to this pipeline stage (frameStartResult/processGpuResult/
+    // cameraTextureReadyResult — confirmed on-device via the diagnostic dump
+    // below, which is exactly what it showed). `reality` is the OUTPUT that
+    // XR8.XrController's own onProcessCpu produces, and per 8th Wall's docs
+    // it only becomes available to other modules at the NEXT stage, onUpdate
+    // — via processCpuResult.reality there. So all of this actually lives in
+    // onUpdate below now, not here.
     onProcessCpu: (processCpuResult) => {
       if (!gameState) return
-
-      // One-time, unconditional ground-truth dump — the lighting/worldPoints/
-      // trackingStatus logs below never fired on-device, which is itself the
-      // signal that matters: either `reality` isn't present at all on this
-      // engine binary build, or it's shaped differently than 8th Wall's
-      // public docs describe. Logging the raw keys here (regardless of
-      // whether anything looks "valid") replaces guessing with an actual
-      // answer the next time this runs on-device.
       if (!hasLoggedRawProcessCpu) {
         hasLoggedRawProcessCpu = true
         const topKeys = processCpuResult ? Object.keys(processCpuResult) : null
-        const realityKeys = processCpuResult && processCpuResult.reality ? Object.keys(processCpuResult.reality) : null
-        debugLog(
-          `RAW onProcessCpu diagnostic — top-level keys: ${JSON.stringify(topKeys)}\n` +
-          `reality present: ${!!(processCpuResult && processCpuResult.reality)}\n` +
-          `reality keys: ${JSON.stringify(realityKeys)}`
-        )
-      }
-
-      const reality = processCpuResult && processCpuResult.reality
-      if (!reality) return
-
-      // ---- lighting estimation -> drive the two scene lights live ----
-      // The exact shape of reality.lighting isn't pinned down in 8th Wall's
-      // public docs (only that it exists on the reality payload once
-      // enableLighting is on) — so this logs its first real sample the same
-      // way trackingStatus is logged below, and tries several plausible
-      // field names defensively rather than assuming one. Check the debug
-      // log on-device and simplify this to whichever field actually shows
-      // up once confirmed.
-      if (reality.lighting) {
-        if (!hasLoggedLightingSample) {
-          hasLoggedLightingSample = true
-          debugLog(`First lighting sample: ${JSON.stringify(reality.lighting)}`)
-        }
-        const L = reality.lighting
-        // Try known/likely field names in order; normalize into a 0..1 range.
-        // Camera exposure-style values (e.g. EV/exposure) are typically NOT
-        // already 0..1, so those get a rough log-ish squash instead of a
-        // raw clamp — approximate on purpose, it's driving mood lighting,
-        // not a physically-correct render.
-        let raw = null
-        if (typeof L.intensity === 'number') raw = L.intensity
-        else if (typeof L.ambientIntensity === 'number') raw = L.ambientIntensity
-        else if (typeof L.brightness === 'number') raw = L.brightness
-        else if (typeof L.exposure === 'number') raw = 1 / (1 + Math.exp(-(L.exposure - 1))) // rough squash toward 0..1
-        else if (typeof L.ev === 'number') raw = Math.min(1, Math.max(0, (L.ev + 3) / 10))
-
-        if (raw != null) {
-          const target = Math.min(1, Math.max(0.08, raw)) // floor so the scene never goes fully black from a bad sample
-          smoothedLightLevel += (target - smoothedLightLevel) * 0.08 // slow lerp — avoids visible flicker
-          if (ambientLight) ambientLight.intensity = 0.25 + smoothedLightLevel * 0.6
-          if (directionalLight) directionalLight.intensity = 0.3 + smoothedLightLevel * 0.9
-        }
-      }
-
-      // ---- world points -> feed the scan-progress hint text ----
-      if (Array.isArray(reality.worldPoints)) {
-        if (!hasLoggedWorldPointsSample && reality.worldPoints.length > 0) {
-          hasLoggedWorldPointsSample = true
-          debugLog(`First worldPoints sample: ${reality.worldPoints.length} points. Example point: ${JSON.stringify(reality.worldPoints[0])}`)
-        }
-        latestWorldPointCount = reality.worldPoints.length
-      }
-
-      // ---- tracking status (existing) ----
-      if (!reality.trackingStatus) return
-      const status = reality.trackingStatus
-      if (!hasLoggedTrackingSample) {
-        hasLoggedTrackingSample = true
-        debugLog(`First SLAM tracking status sample: ${JSON.stringify({ status, reason: reality.trackingReason })}`)
-      }
-
-      if (status !== lastTrackingStatus) {
-        const wasGood = lastTrackingStatus === 'NORMAL' || lastTrackingStatus === 'TRACKING'
-        const isBad = status !== 'NORMAL' && status !== 'TRACKING'
-        if (wasGood && isBad) {
-          gameState.onTrackingDisrupted()
-        }
-        lastTrackingStatus = status
+        debugLog(`RAW onProcessCpu argument keys (this is INPUT to the stage, not reality): ${JSON.stringify(topKeys)}`)
       }
     },
 
