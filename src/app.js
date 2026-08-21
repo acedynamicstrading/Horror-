@@ -207,6 +207,14 @@ const initScenePipelineModule = () => {
 
       surfaceSampler.update()
       gameState.update(delta)
+
+      if (gameState.getState() === GameStates.SCANNING) {
+        const sizes = surfaceSampler.poolSizes()
+        setHintText(
+          `Searching for a breach... (walls ${Math.min(sizes.wall, 3)}/3, floor ${Math.min(sizes.floor, 2)}/2) — move slowly, angle the phone at walls and the floor.`,
+        )
+      }
+
       // Scares only run once the room-scan story beat has completed — no
       // ghosts appear during the initial "searching for a breach" phase or
       // mid-glitch.
