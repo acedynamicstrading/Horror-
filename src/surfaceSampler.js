@@ -101,8 +101,13 @@ export const createSurfaceSampler = () => {
   const sampleOnce = () => {
     if (!window.XR8 || !window.XR8.XrController) return
 
-    const x = Math.random() * window.innerWidth
-    const y = Math.random() * window.innerHeight
+    // hitTest expects NORMALIZED [0,1] screen coordinates, not pixels — see
+    // 8th Wall's own docs/example (x = clientX / innerWidth). Passing raw
+    // pixel values here meant almost every hitTest() call asked for a point
+    // far outside the valid range and silently returned zero results, which
+    // is why wall/floor pools filled at all only by rare chance.
+    const x = Math.random()
+    const y = Math.random()
 
     const results = window.XR8.XrController.hitTest(x, y, ['FEATURE_POINT', 'ESTIMATED_SURFACE'])
     if (!results || results.length === 0) return
