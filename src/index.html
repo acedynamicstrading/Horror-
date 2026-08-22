@@ -128,7 +128,7 @@
     /* --- Settings --- */
     #settingsBtn {
       position: absolute;
-      top: 14px;
+      bottom: 14px;
       right: 14px;
       width: 42px;
       height: 42px;
@@ -138,7 +138,11 @@
       color: #eee;
       font-size: 20px;
       line-height: 1;
-      z-index: 40;
+      /* #debug is z-index:9999 and, since debugLog defaults to on, was
+         sitting on top of this button's old top-right spot and swallowing
+         every tap. Bottom-right + above 9999 fixes both: unreachable
+         corner, and unclickable regardless of debug-panel state. */
+      z-index: 10000;
       -webkit-tap-highlight-color: transparent;
     }
     #settingsBtn:active { transform: scale(0.92); }
@@ -147,7 +151,7 @@
       position: absolute;
       inset: 0;
       background: rgba(0, 0, 0, 0.5);
-      z-index: 45;
+      z-index: 10001; /* same reasoning as #settingsBtn — stay above #debug */
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.2s ease;
@@ -162,7 +166,7 @@
       left: 0;
       right: 0;
       bottom: 0;
-      z-index: 50;
+      z-index: 10002; /* same reasoning as #settingsBtn — stay above #debug */
       background: rgba(15, 17, 18, 0.95);
       border-top: 1px solid rgba(255, 255, 255, 0.15);
       border-radius: 16px 16px 0 0;
