@@ -124,6 +124,96 @@
       box-shadow: 0 0 18px rgba(120, 220, 255, 0.7);
     }
     #shutter:active { transform: scale(0.92); }
+
+    /* --- Settings --- */
+    #settingsBtn {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      border: 1px solid rgba(255, 255, 255, 0.35);
+      background: rgba(0, 0, 0, 0.35);
+      color: #eee;
+      font-size: 20px;
+      line-height: 1;
+      z-index: 40;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #settingsBtn:active { transform: scale(0.92); }
+
+    #settingsBackdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 45;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    #settingsBackdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    #settingsPanel {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 50;
+      background: rgba(15, 17, 18, 0.95);
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 16px 16px 0 0;
+      padding: 16px 20px calc(20px + env(safe-area-inset-bottom, 0px));
+      transform: translateY(100%);
+      transition: transform 0.25s ease;
+      font-family: -apple-system, sans-serif;
+      color: #eee;
+      pointer-events: none;
+    }
+    #settingsPanel.open {
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    #settingsClose {
+      background: none;
+      border: none;
+      color: #eee;
+      font-size: 20px;
+      padding: 4px 8px;
+      line-height: 1;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 0;
+      font-size: 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .settings-row:last-child { border-bottom: none; }
+    .settings-row input[type="range"] {
+      flex: 1;
+      max-width: 55%;
+      accent-color: rgba(120, 220, 255, 0.9);
+    }
+    .settings-row-toggle input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      accent-color: rgba(120, 220, 255, 0.9);
+    }
   </style>
 </head>
 <body>
@@ -138,6 +228,31 @@
     </svg>
   </div>
   <button id="shutter" aria-label="Capture"></button>
+
+  <button id="settingsBtn" aria-label="Settings">⚙</button>
+  <div id="settingsBackdrop"></div>
+  <div id="settingsPanel">
+    <div class="settings-header">
+      <span>Settings</span>
+      <button id="settingsClose" aria-label="Close settings">✕</button>
+    </div>
+    <label class="settings-row">
+      <span>Brightness</span>
+      <input type="range" id="settingBrightness" min="0" max="1" step="0.01">
+    </label>
+    <label class="settings-row">
+      <span>Haunted Intensity</span>
+      <input type="range" id="settingHaunt" min="0" max="1" step="0.01">
+    </label>
+    <label class="settings-row settings-row-toggle">
+      <span>Glitch Effects</span>
+      <input type="checkbox" id="settingGlitch">
+    </label>
+    <label class="settings-row settings-row-toggle">
+      <span>Debug Log</span>
+      <input type="checkbox" id="settingDebug">
+    </label>
+  </div>
 
   <div id="debug"></div>
 </body>

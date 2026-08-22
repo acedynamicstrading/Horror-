@@ -8,10 +8,16 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js'
 //
 // The real room stays normally lit (AR/SLAM tracking needs that). This pass
 // is what makes the *screen* look like a haunted dimension regardless of the
-// real world's actual brightness: a constant dark vignette/desaturation/grain
+// real world's actual brightness: a dark vignette/desaturation/grain
 // baseline, with a uFlash uniform that game logic can tween up briefly for
 // scripted jump-scare "flash" beats (proximity, timers, item use, monster
 // abilities — never real ambient light).
+//
+// uBrightness / uHauntIntensity are user-adjustable (settingsPanel.js) —
+// baseline exposure and vignette/desaturation strength are computed from
+// them instead of being fixed constants, so a player who finds the default
+// too dark (or not moody enough) can tune it live instead of it being a
+// one-size-fits-all guess baked into the shader.
 // ---------------------------------------------------------------------------
 
 const hauntedShader = {
@@ -24,6 +30,14 @@ const hauntedShader = {
     // tracking gets lost/reset (e.g. walking into an unscanned room), so the
     // moment reads as in-fiction interference rather than a broken app.
     uGlitch: { value: 0 },
+    // 0..1 user setting -> baseline exposure lift. Default 0.5 lands close
+    // to the hand-tuned 0.88 baseline exposure from before this was
+    // adjustable.
+    uBrightness: { value: 0.5 },
+    // 0..1 user setting -> how strong the vignette + desaturation read.
+    // Default 0.6 lands close to the earlier hand-tuned 0.32 desat / 1.05
+    // vignette baseline.
+    uHauntIntensity: { value: 0.6 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -37,6 +51,8 @@ const hauntedShader = {
     uniform float uTime;
     uniform float uFlash;
     uniform float uGlitch;
+    uniform float uBrightness;
+    uniform float uHauntIntensity;
     varying vec2 vUv;
 
     // Cheap pseudo-random for film grain / glitch noise.
@@ -69,28 +85,34 @@ const hauntedShader = {
         color.rgb *= 1.0 - dropout * 0.85 * uGlitch;
       }
 
+      // Baseline strength values, driven by the two user settings instead of
+      // fixed constants.
+      float exposureBaseline = 0.6 + uBrightness * 0.5;   // 0.6 .. 1.1
+      float vignetteBaseline = 0.4 + uHauntIntensity * 1.2; // 0.4 .. 1.6
+      float desatBaseline = 0.08 + uHauntIntensity * 0.42;  // 0.08 .. 0.5
+
       // Desaturate toward baseline, less desaturated during a flash.
       float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-      float desatAmount = mix(0.45, 0.15, uFlash);
+      float desatAmount = mix(desatBaseline, desatBaseline * 0.35, uFlash);
       color.rgb = mix(color.rgb, vec3(gray), desatAmount);
 
       // Cold, slightly sickly tint for the "haunted" baseline.
-      vec3 tint = vec3(0.75, 0.95, 1.0);
+      vec3 tint = vec3(0.8, 0.97, 1.0);
       color.rgb *= mix(tint, vec3(1.0), uFlash);
 
       // Vignette: strong at baseline, pulls back during a flash.
       vec2 centered = vUv - 0.5;
-      float vignette = 1.0 - dot(centered, centered) * mix(1.3, 0.4, uFlash);
+      float vignette = 1.0 - dot(centered, centered) * mix(vignetteBaseline, vignetteBaseline * 0.3, uFlash);
       vignette = clamp(vignette, 0.0, 1.0);
       color.rgb *= vignette;
 
       // Overall exposure: dark baseline, brightened during a flash.
-      float exposure = mix(0.75, 1.15, uFlash);
+      float exposure = mix(exposureBaseline, exposureBaseline * 1.3 + 0.1, uFlash);
       color.rgb *= exposure;
 
       // Film grain, constant texture regardless of flash state. Amplified
       // during a glitch for extra "static" texture.
-      float grainAmount = mix(0.06, 0.16, uGlitch);
+      float grainAmount = mix(0.05, 0.16, uGlitch);
       float grain = (rand(vUv * uTime) - 0.5) * grainAmount;
       color.rgb += grain;
 
@@ -110,6 +132,11 @@ export const createHauntedVision = ({ renderer, scene, camera, width, height }) 
   composer.setSize(width, height)
 
   let flashTarget = 0 // where uFlash is tweening toward
+  // When false, setGlitch()/portalOpen()'s glitch burst is suppressed
+  // entirely (settingsPanel.js's "Glitch Effects" toggle) — some players
+  // find the RGB-split/row-displacement look uncomfortable, so this is a
+  // real accessibility switch, not just a visual preference.
+  let glitchEnabled = true
   const clock = new THREE.Clock()
 
   const setSize = (w, h) => composer.setSize(w, h)
@@ -134,17 +161,45 @@ export const createHauntedVision = ({ renderer, scene, camera, width, height }) 
     }, durationMs)
   }
 
-  // The "portal opening" reveal, once enough of the room has been scanned —
-  // same mechanism as flash(), just a longer, more deliberate hold to read
-  // as a discovery beat rather than a jump scare.
-  const portalOpen = (durationMs = 1200) => flash(durationMs)
-
-  // Toggles the "signal disrupted" glitch look — used when SLAM tracking
-  // gets lost/reset (e.g. player walked into an unscanned room). Instant,
-  // not eased — glitches should look abrupt, not smooth.
-  const setGlitch = (active) => {
-    shaderPass.uniforms.uGlitch.value = active ? 1 : 0
+  // The "portal opening" reveal, once enough of the room has been scanned.
+  // Same flash() mechanism for the deliberate hold (a discovery beat, not a
+  // jump scare), layered with a brief glitch burst right at the start — the
+  // breach tearing open should read as a disruption, not a clean fade-in.
+  const portalOpen = (durationMs = 1200) => {
+    flash(durationMs)
+    setGlitch(true)
+    setTimeout(() => setGlitch(false), Math.min(450, durationMs))
   }
 
-  return { render, setSize, flash, portalOpen, setGlitch }
+  // Toggles the "signal disrupted" glitch look — used when SLAM tracking
+  // gets lost/reset (e.g. player walked into an unscanned room) and by
+  // portalOpen() above. Instant, not eased — glitches should look abrupt,
+  // not smooth. No-ops (forces off) while glitchEnabled is false.
+  const setGlitch = (active) => {
+    shaderPass.uniforms.uGlitch.value = active && glitchEnabled ? 1 : 0
+  }
+
+  // settingsPanel.js hooks — 0..1 inputs, clamped defensively since these
+  // come straight off a <input type="range"> value.
+  const setBrightness = (v) => {
+    shaderPass.uniforms.uBrightness.value = Math.min(1, Math.max(0, v))
+  }
+  const setHauntIntensity = (v) => {
+    shaderPass.uniforms.uHauntIntensity.value = Math.min(1, Math.max(0, v))
+  }
+  const setGlitchEnabled = (enabled) => {
+    glitchEnabled = !!enabled
+    if (!glitchEnabled) shaderPass.uniforms.uGlitch.value = 0
+  }
+
+  return {
+    render,
+    setSize,
+    flash,
+    portalOpen,
+    setGlitch,
+    setBrightness,
+    setHauntIntensity,
+    setGlitchEnabled,
+  }
 }

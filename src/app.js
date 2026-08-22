@@ -5,6 +5,8 @@ import { createScareScheduler } from './scareSystem'
 import { loadSkeletonGhostTemplate, createSkeletonGhostInstance } from './ghosts/skeletonGhost'
 import { createGameState, GameStates } from './gameState'
 import { createCaptureSystem } from './captureSystem'
+import { createResidueField } from './hauntedResidue'
+import { initSettingsPanel } from './settingsPanel'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -14,15 +16,28 @@ window.THREE = THREE
 
 // ---------------------------------------------------------------------------
 // On-screen debug logger. Prints errors directly on the page so they're
-// visible on a phone without needing devtools.
+// visible on a phone without needing devtools. Visibility now goes through
+// window.setDebugLogVisible() (wired to the Settings panel's "Debug Log"
+// toggle in settingsPanel.js) instead of always forcing itself on — the
+// panel is read/applied as soon as it initializes in onStart, so this
+// still defaults to visible (matching the old always-on behavior) for the
+// brief window before that happens.
 // ---------------------------------------------------------------------------
+let debugLogVisible = true
+
 const debugLog = (msg) => {
   const el = document.getElementById('debug')
   if (!el) return
-  el.style.display = 'block'
   el.textContent += msg + '\n\n'
+  if (debugLogVisible) el.style.display = 'block'
 }
 window.debugLog = debugLog
+
+window.setDebugLogVisible = (visible) => {
+  debugLogVisible = !!visible
+  const el = document.getElementById('debug')
+  if (el) el.style.display = debugLogVisible ? 'block' : 'none'
+}
 
 window.onerror = (message, source, lineno, colno, error) => {
   debugLog(`ERROR: ${message}\nat ${source}:${lineno}:${colno}\n${error && error.stack ? error.stack : ''}`)
@@ -65,7 +80,8 @@ const onGameStateChange = (state, gameStateApi) => {
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
-  let surfaceSampler, scareScheduler, gameState, captureSystem
+  let surfaceSampler, scareScheduler, gameState, captureSystem, residueField
+  let residueSpawnClock = 0
   let clock
   let lastTrackingStatus = null
   let hasLoggedTrackingSample = false
@@ -159,6 +175,18 @@ const initScenePipelineModule = () => {
       // window.hauntedVision.flash() for a scripted jump-scare beat.
       window.hauntedVision = hauntedVision
 
+      // Settings panel — brightness / haunted intensity / glitch toggle /
+      // debug log toggle. Wired here (not at module top-level) since it
+      // needs hauntedVision to exist first to apply the saved values.
+      initSettingsPanel({ hauntedVision })
+
+      // "Texture the environment" — procedural residue decals dropped onto
+      // surfaces as they're scanned (see hauntedResidue.js). There's no real
+      // environment mesh to texture directly (SLAM only gives us hit-test
+      // points), so this pins flat, semi-transparent grunge planes to
+      // sampled points, the same way ghosts anchor to them.
+      residueField = createResidueField({ scene })
+
       // Ghost pool: load the real skeleton model ONCE, then clone it per
       // pool slot (SkeletonUtils.clone — required for skinned meshes, a
       // plain Object3D.clone() does not correctly duplicate bone bindings).
@@ -211,16 +239,23 @@ const initScenePipelineModule = () => {
         shutterEl: document.getElementById('shutter'),
         onCapture: (ghost) => {
           hauntedVision.flash(300)
-          if (ghost.forceDespawn) ghost.forceDespawn()
+          // captureDespawn() plays a quick "pulled into the lens" snap
+          // toward the camera instead of an instant pop; forceDespawn is
+          // the fallback for any ghost type that doesn't implement it.
+          if (ghost.captureDespawn) ghost.captureDespawn(camera.position)
+          else if (ghost.forceDespawn) ghost.forceDespawn()
           debugLog('Capture!')
         },
         onBreakout: (ghost) => {
-          hauntedVision.flash(200)
+          hauntedVision.flash(260)
+          hauntedVision.setGlitch(true)
+          setTimeout(() => hauntedVision.setGlitch(false), 260)
           debugLog('Breakout — capture timer ran out.')
-          // Entity still needs its own "rush the player, then re-hide"
-          // behavior (see scene script's BROKEN_OUT state) — not wired yet,
-          // so it just despawns for now rather than looping forever.
-          if (ghost.forceDespawn) ghost.forceDespawn()
+          // Entity's "rush the player, then re-hide" behavior (scene
+          // script's BROKEN_OUT state): charges the camera, then bursts
+          // back and re-registers a new hiding spot as a re-find target.
+          if (ghost.breakout) ghost.breakout(camera.position)
+          else if (ghost.forceDespawn) ghost.forceDespawn()
         },
       })
 
@@ -313,6 +348,18 @@ const initScenePipelineModule = () => {
       surfaceSampler.update()
       gameState.update(delta)
 
+      // Drip-feed residue decals from whatever's already been scanned —
+      // throttled (not every frame) and self-limiting (hauntedResidue.js
+      // caps total count + dedups near-duplicate spots), so the room
+      // gradually reads as more "marked up" the more of it you scan.
+      residueSpawnClock += delta
+      if (residueField && residueSpawnClock >= 1.1) {
+        residueSpawnClock = 0
+        const point = surfaceSampler.getRandomPoint('any')
+        if (point) residueField.addAt(point)
+      }
+      if (residueField) residueField.update(delta)
+
       if (gameState.getState() === GameStates.SCANNING) {
         const sizes = surfaceSampler.poolSizes()
         const pointsNote = latestWorldPointCount > 0 ? ` · ${latestWorldPointCount} points mapped` : ''
@@ -327,7 +374,7 @@ const initScenePipelineModule = () => {
       if (gameState.getState() === GameStates.ACTIVE) {
         scareScheduler.update(delta, camera.position)
       }
-      ghostPool.forEach((ghost) => ghost.update(delta))
+      ghostPool.forEach((ghost) => ghost.update(delta, camera.position))
       if (captureSystem) captureSystem.update(delta)
     },
 
@@ -359,12 +406,13 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      // Haunted shader temporarily disabled — was reading as too dark.
-      // Flip this back to `if (hauntedVision) hauntedVision.render()` to
-      // re-enable the vignette/desaturation/glitch/flash effect. Note:
-      // flash()/portalOpen()/setGlitch() calls elsewhere still run fine —
-      // they just have no visible effect while render() itself is skipped.
-      // if (hauntedVision) hauntedVision.render()
+      // Re-enabled — was disabled because the baseline vignette/desaturation
+      // read as too dark. Rather than cut the effect entirely, hauntedShader.js
+      // was retuned (lighter baseline exposure, softer vignette/desaturation)
+      // so the "haunted lens" look stays without losing readability. If it's
+      // still too dark on-device, tune the baseline constants in
+      // hauntedShader.js rather than disabling this line again.
+      if (hauntedVision) hauntedVision.render()
     },
   }
 }

@@ -3,15 +3,11 @@
 // frame an entity, hold it centered, its focus meter drains toward capture;
 // run out of captureTimer first and it breaks out instead.
 //
-// SIMPLIFICATION (flagged, not hidden): this version treats every active
-// ghost as capturable the moment it's on screen. The story bible's real rule
-// — first-ever reveal is scare-only, only a re-find is capturable — needs
-// persistent per-spawn-point entity memory (does THIS spot's entity have a
-// prior sighting already) that doesn't exist yet. That's a separate, larger
-// piece (touches scareSystem.js's spawn selection + surfaceSampler.js's
-// point identity). This module is written so bolting that on later is just
-// changing what counts as a valid `candidate` below — nothing here has to
-// be rebuilt.
+// The earlier "every active ghost is capturable" simplification is gone now
+// that skeletonGhost.js's state machine actually tracks first-reveal vs.
+// re-find (isCapturable()) — pickTarget() below only ever considers a ghost
+// currently in its capturableLinger state, so a first-ever scare-only
+// reveal can't be framed-and-photographed like a real re-find.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three'
@@ -54,6 +50,9 @@ export const createCaptureSystem = ({ ghostPool, camera, reticleEl, shutterEl, o
 
     ghostPool.forEach((ghost) => {
       if (!ghost.isActive()) return
+      // Backward-compatible: a ghost type that doesn't implement
+      // isCapturable() is treated as always-capturable while active.
+      if (ghost.isCapturable && !ghost.isCapturable()) return
       const screen = screenDistanceFromCenter(ghost.mesh.position, camera)
       if (!screen) return
       if (screen.dist < bestDist) {
