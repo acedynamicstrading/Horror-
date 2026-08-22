@@ -3,9 +3,13 @@ import { createHauntedVision } from './hauntedShader'
 import { createSurfaceSampler } from './surfaceSampler'
 import { createScareScheduler } from './scareSystem'
 import { loadSkeletonGhostTemplate, createSkeletonGhostInstance } from './ghosts/skeletonGhost'
+import { createCrawlSpider } from './ghosts/crawlSpider'
 import { createGameState, GameStates } from './gameState'
 import { createCaptureSystem } from './captureSystem'
 import { createResidueField } from './hauntedResidue'
+import { createBleedingWalls } from './effects/bleedingWalls'
+import { createHauntedFurniture } from './effects/hauntedFurniture'
+import { createAudioManager } from './spatialAudio'
 import { initSettingsPanel } from './settingsPanel'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
@@ -81,12 +85,31 @@ const onGameStateChange = (state, gameStateApi) => {
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
   let surfaceSampler, scareScheduler, gameState, captureSystem, residueField
+  let bleedingWalls, hauntedFurniture, audio
   let residueSpawnClock = 0
   let clock
   let lastTrackingStatus = null
   let hasLoggedTrackingSample = false
   let hasLoggedRawProcessCpu = false
   let hasLoggedRealitySample = false
+
+  // Drives how often the room's haunting (bleeding walls, furniture decay)
+  // escalates. Local to this module rather than gameState.js, since
+  // gameState.js only tracks the scan/glitch technical states, not
+  // gameplay progress — this is a lightweight stand-in for the full
+  // "roomsCleared" progress tracker scene-script.md describes (still
+  // unbuilt), enough to make the room feel increasingly wrong as the
+  // player succeeds without building the rest of that system early.
+  const INTENSITY_CAPTURE_CAP = 6 // captures needed to reach max intensity
+  let entitiesCaptured = 0
+  const getIntensity = () => Math.min(entitiesCaptured / INTENSITY_CAPTURE_CAP, 1)
+
+  // Chance that a fresh (first-ever) entity emergence also kicks off a
+  // nearby wall bleed — ties the haunting's set-dressing to what the
+  // player is actually doing instead of it running on a fully independent
+  // schedule. Deliberately not 100%: unpredictable pairing reads as the
+  // room reacting; guaranteed reads as a scripted combo.
+  const BLEED_ON_EMERGE_CHANCE = 0.5
 
   // Live lighting estimation — references to the two fixed-intensity lights
   // created in onStart, so onProcessCpu can drive their brightness/warmth
@@ -107,8 +130,12 @@ const initScenePipelineModule = () => {
 
   // Small pool of reusable ghost instances rather than creating a new mesh
   // per scare — cheaper, and simple to reason about with only a few ghosts
-  // ever active on screen at once.
+  // ever active on screen at once. Spiders (createCrawlSpider) share this
+  // SAME array — both entity types implement the identical API, so
+  // captureSystem.js/gameState.js/scareSystem.js never need to know two
+  // entity types exist.
   const GHOST_POOL_SIZE = 3
+  const SPIDER_POOL_SIZE = 3
   const ghostPool = []
 
   const getIdleGhost = () => ghostPool.find((g) => !g.isActive())
@@ -122,6 +149,14 @@ const initScenePipelineModule = () => {
     if (!ghost) return // all ghosts already active — skip this scare attempt
     const normal = point.normal || new THREE.Vector3(0, 1, 0)
     ghost.spawnAt(point.position, normal, opts)
+
+    // A fresh (non-refind) emergence is a real "something just appeared"
+    // moment — occasionally tie a nearby wall bleed to it so the room
+    // reacts to what's happening instead of bleeding on a fully
+    // independent schedule.
+    if (!opts.isRefind && bleedingWalls && Math.random() < BLEED_ON_EMERGE_CHANCE) {
+      bleedingWalls.spawnNear(point)
+    }
   }
 
   const resizeCanvas = (canvas) => {
@@ -224,6 +259,57 @@ const initScenePipelineModule = () => {
         })
 
       surfaceSampler = createSurfaceSampler()
+
+      // spatialAudio.js's manager — wired into app.js for the first time
+      // (the module existed but nothing instantiated it before). Only the
+      // "wallDrip" one-shot is used so far (see effects/bleedingWalls.js);
+      // extend the urlMap below as more of spatialAudio.js gets adopted.
+      // Loading is fire-and-forget: if wall-drip.mp3 doesn't exist at this
+      // path yet, spatialAudio.js's requireBuffer() just warns and no-ops
+      // on playback rather than throwing, so this never blocks scene setup.
+      audio = createAudioManager({ camera })
+      audio.load({ wallDrip: '/audio/wall-drip.mp3' }).catch((err) => {
+        debugLog(`spatialAudio: wallDrip failed to load (expected until a real file is added at /audio/wall-drip.mp3): ${err.message}`)
+      })
+
+      // Bleeding walls: real wall points, decal only exists in the
+      // composited scene — never touches the actual room. Wall pool
+      // already includes ceiling hits (surfaceSampler.js's classifier
+      // lumps a downward-facing normal into 'wall' since it doesn't clear
+      // the upDot > 0.7 floor check), so this covers roofs too with no
+      // separate pool. See effects/bleedingWalls.js for the full rationale.
+      bleedingWalls = createBleedingWalls({ surfaceSampler, audio, getIntensity })
+      bleedingWalls.addTo(scene)
+
+      // Haunted furniture: same idea, applied to furniture/floor points
+      // with a mold/rot decal instead of dripping blood (see
+      // effects/hauntedFurniture.js) — so tables, chairs, and the floor
+      // itself read as haunted too, not just the walls.
+      hauntedFurniture = createHauntedFurniture({ surfaceSampler, getIntensity })
+      hauntedFurniture.addTo(scene)
+
+      // Spider pool: primitive-built (no rigged model for this one), but
+      // shares the skeleton ghost's exact state machine/API (see
+      // ghosts/crawlSpider.js) — pushed into the SAME ghostPool array so
+      // captureSystem.js/gameState.js/scareSystem.js see a uniform pool of
+      // capturable entities without knowing two types exist. Unlike the
+      // skeleton ghost, this doesn't need an async model load, so it's
+      // ready immediately rather than a second or two in.
+      for (let i = 0; i < SPIDER_POOL_SIZE; i++) {
+        const spider = createCrawlSpider({
+          seed: i + 1,
+          onRevealPeak: () => hauntedVision.flash(450),
+          onNeedFleeTarget: (currentPoint) =>
+            surfaceSampler.getRandomPointExcluding('any', currentPoint, 0.8),
+          onDespawn: ({ fledTo } = {}) => {
+            if (fledTo && scareScheduler) scareScheduler.registerFledTarget(fledTo)
+          },
+        })
+        scene.add(spider.mesh)
+        ghostPool.push(spider)
+      }
+      debugLog(`Spider pool of ${SPIDER_POOL_SIZE} ready.`)
+
       scareScheduler = createScareScheduler({
         surfaceSampler,
         spawnGhost: spawnGhostAt,
@@ -241,6 +327,7 @@ const initScenePipelineModule = () => {
         reticleEl: document.getElementById('reticle'),
         shutterEl: document.getElementById('shutter'),
         onCapture: (ghost) => {
+          entitiesCaptured += 1
           hauntedVision.flash(300)
           // captureDespawn() plays a quick "pulled into the lens" snap
           // toward the camera instead of an instant pop; forceDespawn is
@@ -379,6 +466,8 @@ const initScenePipelineModule = () => {
       }
       ghostPool.forEach((ghost) => ghost.update(delta, camera.position))
       if (captureSystem) captureSystem.update(delta)
+      if (bleedingWalls) bleedingWalls.update(delta)
+      if (hauntedFurniture) hauntedFurniture.update(delta)
     },
 
     // Per-frame CPU-side data from XrController, including SLAM tracking
@@ -409,13 +498,19 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      // Re-enabled — was disabled because the baseline vignette/desaturation
-      // read as too dark. Rather than cut the effect entirely, hauntedShader.js
-      // was retuned (lighter baseline exposure, softer vignette/desaturation)
-      // so the "haunted lens" look stays without losing readability. If it's
-      // still too dark on-device, tune the baseline constants in
-      // hauntedShader.js rather than disabling this line again.
-      if (hauntedVision) hauntedVision.render()
+      // Disabled again — still reading as too dark on-device even after
+      // the retune (lighter baseline exposure, softer vignette/desaturation
+      // in hauntedShader.js). Likely cause, worth checking before
+      // retuning further: settingsPanel.js persists to localStorage under
+      // the key 'ahh_settings_v1', and that key never changed — so if an
+      // earlier, darker version of the shader was ever tested in this
+      // browser, the OLD saved values are still being loaded over the new,
+      // lighter DEFAULTS every time the page loads. Confirm by opening the
+      // in-game Settings panel and dragging Brightness up manually; if
+      // that visibly helps, bump STORAGE_KEY in settingsPanel.js (e.g. to
+      // 'ahh_settings_v2') so stale saved values get discarded, then
+      // re-enable this line.
+      // if (hauntedVision) hauntedVision.render()
     },
   }
 }
