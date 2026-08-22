@@ -17,6 +17,22 @@
 // skeleton's own real CC_Base_* joint names) for a twitchy "crawling" feel,
 // same spirit as the original primitive version's whole-object tween, just
 // applied per-limb now that we have a real rig to move.
+//
+// STATE MACHINE (rewritten — see the story bible's "Capture, Don't Kill"
+// section and scene-script.md's Entity AI States):
+//
+//   idle -> emerging -> [ scareLinger -> fleeingIn -> idle ]        (first-ever reveal)
+//                     -> [ capturableLinger -> captured -> idle ]   (re-find, player wins)
+//                     -> [ capturableLinger -> lunging -> lungeRetreat -> idle ]  (re-find, timer runs out)
+//
+// The earlier version had ONE fixed-timer emerge/linger/retreat cycle for
+// every spawn, regardless of whether it was a first sighting or a re-find —
+// so a re-found, "should be capturable" entity vanished on its own ~0.9s
+// clock no matter what the reticle/focus-meter loop was doing, and a
+// capture was rarely even possible. Now only a first-ever reveal auto-times
+// out; a re-find (`opts.isRefind`) stays revealed with no internal timer at
+// all until captureDespawn() (player won) or breakout() (capture timer in
+// captureSystem.js ran out) is called on it from outside.
 // ---------------------------------------------------------------------------
 
 import * as THREE from 'three'
@@ -30,12 +46,37 @@ import roughnessUrl from '../assets/textures/skeleton_roughness.png'
 import emissiveUrl from '../assets/textures/skeleton_emissive.png'
 
 const EMERGE_SECONDS = 1.1
-const LINGER_SECONDS = 0.9
-const RETREAT_SECONDS = 0.6
 const REVEAL_PEAK_PROGRESS = 0.55
 const EMERGE_DEPTH = 0.5
 
+// First-ever reveal: brief scare-only linger (never capturable — see the
+// story bible), then it flees to hide at a *different* surface point.
+const SCARE_LINGER_SECONDS = 1.3
+const FLEE_RETREAT_SECONDS = 0.6
+
+// Re-find, while capturable: it creeps forward off its anchor toward the
+// player over time (capped) instead of standing dead still, and twitches
+// harder the longer it's been staring the player down. No fixed duration —
+// see the state machine note above.
+const LEAN_MAX = 0.16 // meters it creeps forward off its anchor
+const LEAN_SPEED = 0.5 // exponential approach rate toward LEAN_MAX, per second
+const TWITCH_BASE = 0.6
+const TWITCH_RAMP = 0.15 // per second, capped below
+const TWITCH_CAP = 1.4
+
+// Breakout — capture timer ran out. A short, violent charge at the camera
+// (the "jump on your face" beat), then it bursts back and re-hides.
+const LUNGE_SECONDS = 0.32
+const LUNGE_STOP_DISTANCE = 0.4 // meters from the camera it charges to
+const LUNGE_RETREAT_SECONDS = 0.3
+const LUNGE_SCALE_PEAK = 1.3
+
+// A landed capture: quick "pulled into the lens" snap for impact, instead
+// of an instant pop.
+const CAPTURED_PULL_SECONDS = 0.22
+
 const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3)
+const easeInCubic = (t) => t * t * t
 
 // Loads the model + builds the material ONCE. Call this a single time at
 // startup, then pass the resolved template into createSkeletonGhostInstance
@@ -88,7 +129,7 @@ const findBone = (root, name) => {
   return found
 }
 
-export const createSkeletonGhostInstance = (template, { onRevealPeak, onDespawn }) => {
+export const createSkeletonGhostInstance = (template, { onRevealPeak, onNeedFleeTarget, onDespawn }) => {
   const root = cloneSkinned(template)
   root.visible = false
   // Verified via the converted glTF's bounding box (~1.93 units tall on the
@@ -110,13 +151,27 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onDespawn 
   let revealFired = false
   let normal = new THREE.Vector3(0, 1, 0)
   let surfacePoint = new THREE.Vector3()
+  let isRefind = false
 
-  const spawnAt = (point, surfaceNormal) => {
+  // Scratch vectors, reused every frame instead of allocated — update() runs
+  // on every active ghost every frame.
+  const faceTarget = new THREE.Vector3()
+  const lungeStart = new THREE.Vector3()
+  const lungeTarget = new THREE.Vector3()
+  const toCamera = new THREE.Vector3()
+
+  const spawnAt = (point, surfaceNormal, opts = {}) => {
     surfacePoint = point.clone()
     normal = surfaceNormal.clone().normalize()
+    isRefind = !!opts.isRefind
 
+    // Orient outward along the surface normal while still buried in it —
+    // camera-facing only kicks in once it's actually revealed (see
+    // faceCamera below), so the "crawling out of the wall" beat still
+    // reads as coming from the surface itself.
     const lookTarget = point.clone().add(normal)
     root.position.copy(point)
+    root.scale.setScalar(1)
     root.up.set(0, 1, 0)
     root.lookAt(lookTarget)
 
@@ -126,6 +181,17 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onDespawn 
     revealFired = false
   }
 
+  // Turns the root to face the camera, locked to the vertical axis only
+  // (camera Y swapped for the ghost's own Y first) — a camera held low or
+  // high should turn the body toward the player, not tip the whole model
+  // onto its side.
+  const faceCamera = (cameraPosition) => {
+    faceTarget.set(cameraPosition.x, root.position.y, cameraPosition.z)
+    if (faceTarget.distanceToSquared(root.position) < 0.0001) return // camera basically on top of it
+    root.up.set(0, 1, 0)
+    root.lookAt(faceTarget)
+  }
+
   const applyTwitch = (intensity) => {
     if (spine) spine.rotation.z = Math.sin(elapsed * 14) * 0.12 * intensity
     if (headBone) headBone.rotation.y = Math.sin(elapsed * 9 + 1) * 0.25 * intensity
@@ -133,7 +199,7 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onDespawn 
     if (armR) armR.rotation.x = -0.6 + Math.cos(elapsed * 12) * 0.25 * intensity
   }
 
-  const update = (delta) => {
+  const update = (delta, cameraPosition) => {
     if (state === 'idle') return
     elapsed += delta
 
@@ -149,46 +215,145 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onDespawn 
         if (onRevealPeak) onRevealPeak()
       }
       if (t >= 1) {
-        state = 'lingering'
+        state = isRefind ? 'capturableLinger' : 'scareLinger'
         elapsed = 0
       }
       return
     }
 
-    if (state === 'lingering') {
-      applyTwitch(0.6)
-      if (elapsed >= LINGER_SECONDS) {
-        state = 'retreating'
+    // First-ever reveal only: scare beat, then flee. Never capturable here —
+    // "first sighting teaches you it exists; you have to go hunt it down."
+    if (state === 'scareLinger') {
+      if (cameraPosition) faceCamera(cameraPosition)
+      applyTwitch(0.7)
+      if (elapsed >= SCARE_LINGER_SECONDS) {
+        state = 'fleeingIn'
         elapsed = 0
       }
       return
     }
 
-    if (state === 'retreating') {
-      const t = Math.min(elapsed / RETREAT_SECONDS, 1)
+    if (state === 'fleeingIn') {
+      const t = Math.min(elapsed / FLEE_RETREAT_SECONDS, 1)
       const eased = t * t
       const depth = EMERGE_DEPTH * eased
       root.position.copy(surfacePoint).addScaledVector(normal, -depth)
       applyTwitch(1 - eased)
-
       if (t >= 1) {
         root.visible = false
         state = 'idle'
-        if (onDespawn) onDespawn()
+        const fledTo = onNeedFleeTarget ? onNeedFleeTarget(surfacePoint) : null
+        if (onDespawn) onDespawn({ fledTo })
       }
+      return
+    }
+
+    // Re-find only: stays revealed and capturable, NO internal timer. Only
+    // an external captureDespawn() or breakout() call ends this state.
+    if (state === 'capturableLinger') {
+      if (cameraPosition) faceCamera(cameraPosition)
+      // Creep forward off its anchor toward the player, capped — reads as
+      // actively closing in rather than just standing there.
+      const leanT = 1 - Math.exp(-LEAN_SPEED * elapsed)
+      root.position.copy(surfacePoint).addScaledVector(normal, LEAN_MAX * leanT)
+      // Twitch intensifies the longer it's been staring the player down.
+      applyTwitch(Math.min(TWITCH_CAP, TWITCH_BASE + elapsed * TWITCH_RAMP))
+      return
+    }
+
+    if (state === 'lunging') {
+      const t = Math.min(elapsed / LUNGE_SECONDS, 1)
+      const eased = easeOutCubic(t)
+      root.position.lerpVectors(lungeStart, lungeTarget, eased)
+      root.scale.setScalar(1 + eased * (LUNGE_SCALE_PEAK - 1))
+      if (cameraPosition) faceCamera(cameraPosition)
+      applyTwitch(1.6)
+      if (t >= 1) {
+        state = 'lungeRetreat'
+        elapsed = 0
+      }
+      return
+    }
+
+    if (state === 'lungeRetreat') {
+      const t = Math.min(elapsed / LUNGE_RETREAT_SECONDS, 1)
+      root.position.lerpVectors(lungeTarget, surfacePoint, t)
+      root.scale.setScalar(LUNGE_SCALE_PEAK - t * (LUNGE_SCALE_PEAK - 1))
+      if (t >= 1) {
+        root.visible = false
+        root.scale.setScalar(1)
+        state = 'idle'
+        // "flees to hide somewhere new and harder to reach" — reuse the
+        // same flee-target request as a first-reveal flee.
+        const fledTo = onNeedFleeTarget ? onNeedFleeTarget(surfacePoint) : null
+        if (onDespawn) onDespawn({ fledTo })
+      }
+      return
+    }
+
+    if (state === 'captured') {
+      const t = Math.min(elapsed / CAPTURED_PULL_SECONDS, 1)
+      root.position.lerpVectors(lungeStart, lungeTarget, easeInCubic(t))
+      root.scale.setScalar(1 - t)
+      if (t >= 1) {
+        root.visible = false
+        root.scale.setScalar(1)
+        state = 'idle'
+      }
+      return
     }
   }
 
   const isActive = () => state !== 'idle'
 
-  // Instantly clears an active ghost with no retreat animation — used when
-  // tracking is disrupted mid-scare, since the surface it was anchored to
-  // may no longer be valid.
+  // True only while it's actually the "hunt it down" target — gates
+  // captureSystem so a first-reveal scare or a mid-lunge charge can't be
+  // framed-and-photographed like a real capturable sighting.
+  const isCapturable = () => state === 'capturableLinger'
+
+  // Instantly clears an active ghost with no animation — used when tracking
+  // is disrupted mid-scare, since the surface it was anchored to may no
+  // longer be valid, so animating toward/away from it isn't safe.
   const forceDespawn = () => {
     root.visible = false
+    root.scale.setScalar(1)
     state = 'idle'
     elapsed = 0
   }
 
-  return { mesh: root, spawnAt, update, isActive, forceDespawn }
+  // Capture timer ran out (captureSystem.js) — charge the camera, then burst
+  // back and re-hide elsewhere.
+  const breakout = (cameraPosition) => {
+    if (state !== 'capturableLinger') return
+    lungeStart.copy(root.position)
+    if (cameraPosition) {
+      toCamera.copy(cameraPosition).sub(root.position)
+      const dist = toCamera.length()
+      if (dist > LUNGE_STOP_DISTANCE) {
+        toCamera.normalize()
+        lungeTarget.copy(cameraPosition).addScaledVector(toCamera, -LUNGE_STOP_DISTANCE)
+      } else {
+        lungeTarget.copy(root.position)
+      }
+    } else {
+      lungeTarget.copy(root.position)
+    }
+    state = 'lunging'
+    elapsed = 0
+  }
+
+  // Player closed the focus meter — pull it into the lens and gone. No flee
+  // target needed; this one's actually caught, not dodging.
+  const captureDespawn = (cameraPosition) => {
+    if (state !== 'capturableLinger' && state !== 'lunging') {
+      forceDespawn()
+      return
+    }
+    lungeStart.copy(root.position)
+    lungeTarget.copy(cameraPosition || root.position)
+    state = 'captured'
+    elapsed = 0
+  }
+
+  return { mesh: root, spawnAt, update, isActive, isCapturable, forceDespawn, breakout, captureDespawn }
 }
