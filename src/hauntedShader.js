@@ -30,13 +30,14 @@ const hauntedShader = {
     // tracking gets lost/reset (e.g. walking into an unscanned room), so the
     // moment reads as in-fiction interference rather than a broken app.
     uGlitch: { value: 0 },
-    // 0..1 user setting -> baseline exposure lift. Default 0.5 lands close
-    // to the hand-tuned 0.88 baseline exposure from before this was
-    // adjustable.
+    // 0..1 user setting -> baseline exposure lift. Raised again after
+    // on-device testing showed the previous baseline was still reading too
+    // dark at this same default of 0.5 — see exposureBaseline below for the
+    // current numbers.
     uBrightness: { value: 0.5 },
     // 0..1 user setting -> how strong the vignette + desaturation read.
-    // Default 0.6 lands close to the earlier hand-tuned 0.32 desat / 1.05
-    // vignette baseline.
+    // Same story — softened further than the last pass. See
+    // vignetteBaseline / desatBaseline below for current numbers.
     uHauntIntensity: { value: 0.6 },
   },
   vertexShader: `
@@ -86,10 +87,14 @@ const hauntedShader = {
       }
 
       // Baseline strength values, driven by the two user settings instead of
-      // fixed constants.
-      float exposureBaseline = 0.6 + uBrightness * 0.5;   // 0.6 .. 1.1
-      float vignetteBaseline = 0.4 + uHauntIntensity * 1.2; // 0.4 .. 1.6
-      float desatBaseline = 0.08 + uHauntIntensity * 0.42;  // 0.08 .. 0.5
+      // fixed constants. Raised again (previously 0.6../0.4../0.08..) after
+      // on-device testing (dim-ish room, default slider positions) showed
+      // the prior retune still read as too dark — mainly the vignette
+      // crushing the edges toward black. See app.js's onRender comment for
+      // the history of this constant.
+      float exposureBaseline = 0.75 + uBrightness * 0.55;   // 0.75 .. 1.3
+      float vignetteBaseline = 0.3 + uHauntIntensity * 0.9; // 0.3 .. 1.2
+      float desatBaseline = 0.05 + uHauntIntensity * 0.3;   // 0.05 .. 0.35
 
       // Desaturate toward baseline, less desaturated during a flash.
       float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
