@@ -30,15 +30,21 @@ const hauntedShader = {
     // tracking gets lost/reset (e.g. walking into an unscanned room), so the
     // moment reads as in-fiction interference rather than a broken app.
     uGlitch: { value: 0 },
-    // 0..1 user setting -> baseline exposure lift. Raised again after
-    // on-device testing showed the previous baseline was still reading too
-    // dark at this same default of 0.5 — see exposureBaseline below for the
-    // current numbers.
+    // 0..1 user setting -> shadow-lift strength (gamma curve, not a linear
+    // multiply — a linear multiply is too weak to rescue a genuinely dark
+    // real-world room, which is exactly the case that needs this control).
     uBrightness: { value: 0.5 },
-    // 0..1 user setting -> how strong the vignette + desaturation read.
-    // Same story — softened further than the last pass. See
-    // vignetteBaseline / desatBaseline below for current numbers.
-    uHauntIntensity: { value: 0.6 },
+    // 0..1 user setting -> vignette darkness at the screen edges. Was
+    // previously coupled to desaturation under one "Haunted Intensity"
+    // slider — split out since a player fighting a too-dark screen needs to
+    // cut vignette without also having to give up the desaturated look.
+    uVignette: { value: 0.5 },
+    // 0..1 user setting -> how much color gets pulled toward grayscale.
+    uDesaturation: { value: 0.3 },
+    // 0..1 user setting -> strength of the cold/sickly color tint.
+    uTint: { value: 0.5 },
+    // 0..1 user setting -> film grain amount.
+    uGrain: { value: 0.3 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -53,7 +59,10 @@ const hauntedShader = {
     uniform float uFlash;
     uniform float uGlitch;
     uniform float uBrightness;
-    uniform float uHauntIntensity;
+    uniform float uVignette;
+    uniform float uDesaturation;
+    uniform float uTint;
+    uniform float uGrain;
     varying vec2 vUv;
 
     // Cheap pseudo-random for film grain / glitch noise.
@@ -86,38 +95,37 @@ const hauntedShader = {
         color.rgb *= 1.0 - dropout * 0.85 * uGlitch;
       }
 
-      // Baseline strength values, driven by the two user settings instead of
-      // fixed constants. Raised again (previously 0.6../0.4../0.08..) after
-      // on-device testing (dim-ish room, default slider positions) showed
-      // the prior retune still read as too dark — mainly the vignette
-      // crushing the edges toward black. See app.js's onRender comment for
-      // the history of this constant.
-      float exposureBaseline = 0.75 + uBrightness * 0.55;   // 0.75 .. 1.3
-      float vignetteBaseline = 0.3 + uHauntIntensity * 0.9; // 0.3 .. 1.2
-      float desatBaseline = 0.05 + uHauntIntensity * 0.3;   // 0.05 .. 0.35
-
       // Desaturate toward baseline, less desaturated during a flash.
       float gray = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-      float desatAmount = mix(desatBaseline, desatBaseline * 0.35, uFlash);
+      float desatAmount = mix(uDesaturation, uDesaturation * 0.35, uFlash);
       color.rgb = mix(color.rgb, vec3(gray), desatAmount);
 
-      // Cold, slightly sickly tint for the "haunted" baseline.
-      vec3 tint = vec3(0.8, 0.97, 1.0);
+      // Cold, slightly sickly tint for the "haunted" baseline — uTint
+      // controls how much of it applies (0 = no tint at all).
+      vec3 tintColor = vec3(0.8, 0.97, 1.0);
+      vec3 tint = mix(vec3(1.0), tintColor, uTint);
       color.rgb *= mix(tint, vec3(1.0), uFlash);
 
       // Vignette: strong at baseline, pulls back during a flash.
       vec2 centered = vUv - 0.5;
-      float vignette = 1.0 - dot(centered, centered) * mix(vignetteBaseline, vignetteBaseline * 0.3, uFlash);
+      float vignetteStrength = uVignette * 1.2;
+      float vignette = 1.0 - dot(centered, centered) * mix(vignetteStrength, vignetteStrength * 0.3, uFlash);
       vignette = clamp(vignette, 0.0, 1.0);
       color.rgb *= vignette;
 
-      // Overall exposure: dark baseline, brightened during a flash.
-      float exposure = mix(exposureBaseline, exposureBaseline * 1.3 + 0.1, uFlash);
-      color.rgb *= exposure;
+      // Shadow lift: a gamma curve, not a linear multiply — a multiply can
+      // only ever scale a dark pixel by a fixed factor (weak in a genuinely
+      // dark real room), where a gamma curve actively lifts shadows toward
+      // midtones without blowing out whatever's already bright. uBrightness
+      // 0 = no lift (gamma 1.0), 1 = strong lift (gamma 0.35).
+      float gamma = mix(1.0, 0.35, uBrightness);
+      color.rgb = pow(max(color.rgb, 0.0001), vec3(gamma));
+      // Flash still adds a further brighten on top, same as before.
+      color.rgb *= mix(1.0, 1.35, uFlash);
 
       // Film grain, constant texture regardless of flash state. Amplified
       // during a glitch for extra "static" texture.
-      float grainAmount = mix(0.05, 0.16, uGlitch);
+      float grainAmount = mix(uGrain * 0.18, uGrain * 0.3, uGlitch);
       float grain = (rand(vUv * uTime) - 0.5) * grainAmount;
       color.rgb += grain;
 
@@ -189,8 +197,17 @@ export const createHauntedVision = ({ renderer, scene, camera, width, height }) 
   const setBrightness = (v) => {
     shaderPass.uniforms.uBrightness.value = Math.min(1, Math.max(0, v))
   }
-  const setHauntIntensity = (v) => {
-    shaderPass.uniforms.uHauntIntensity.value = Math.min(1, Math.max(0, v))
+  const setVignette = (v) => {
+    shaderPass.uniforms.uVignette.value = Math.min(1, Math.max(0, v))
+  }
+  const setDesaturation = (v) => {
+    shaderPass.uniforms.uDesaturation.value = Math.min(1, Math.max(0, v))
+  }
+  const setTint = (v) => {
+    shaderPass.uniforms.uTint.value = Math.min(1, Math.max(0, v))
+  }
+  const setGrain = (v) => {
+    shaderPass.uniforms.uGrain.value = Math.min(1, Math.max(0, v))
   }
   const setGlitchEnabled = (enabled) => {
     glitchEnabled = !!enabled
@@ -204,7 +221,10 @@ export const createHauntedVision = ({ renderer, scene, camera, width, height }) 
     portalOpen,
     setGlitch,
     setBrightness,
-    setHauntIntensity,
+    setVignette,
+    setDesaturation,
+    setTint,
+    setGrain,
     setGlitchEnabled,
   }
 }

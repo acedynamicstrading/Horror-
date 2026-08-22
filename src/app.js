@@ -178,7 +178,10 @@ const initScenePipelineModule = () => {
       // Settings panel — brightness / haunted intensity / glitch toggle /
       // debug log toggle. Wired here (not at module top-level) since it
       // needs hauntedVision to exist first to apply the saved values.
-      initSettingsPanel({ hauntedVision })
+      // Stored on window so the current live-tuned values can be read off
+      // the browser console (window.settingsPanel.getSettings()) once
+      // they're dialed in on-device — that's the numbers to report back.
+      window.settingsPanel = initSettingsPanel({ hauntedVision })
 
       // "Texture the environment" — procedural residue decals dropped onto
       // surfaces as they're scanned (see hauntedResidue.js). There's no real
