@@ -21,6 +21,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Upload the WHOLE project (src/, config/, package.json, everything
+      # except node_modules/dist which get regenerated) as one project.zip
+      # at the repo root, and this unpacks it right here, before install/
+      # build even run — no need to navigate folders in GitHub's mobile
+      # upload UI at all, just replace this one file each time.
+      #
+      # IMPORTANT: this workflow file itself (deploy.yml) can't be inside
+      # project.zip and take effect on the SAME run that introduces it —
+      # GitHub reads the workflow file from the repo at the commit that
+      # triggered the run, before any step (including this one) executes.
+      # A deploy.yml change bundled inside project.zip only takes effect
+      # starting from the NEXT push after that. Not a bug, just how Actions
+      # works — same reason .github/workflows/*.yml files always need to be
+      # real, uploaded-individually files, never zipped.
+      #
+      # Safe to leave permanently — does nothing if project.zip isn't
+      # present, same pattern as the assets.zip step below.
+      - name: Unpack project.zip if present
+        run: |
+          if [ -f project.zip ]; then
+            unzip -o project.zip -d .
+          fi
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -29,12 +52,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # Assets (3D models, textures) are uploaded to the repo as a single
-      # zip (assets.zip at the repo root) since mobile GitHub's web upload
-      # UI can't reliably create nested folders. This unpacks it into
-      # src/assets/ right before the build, overwriting whatever's there.
-      # If assets.zip isn't present, this step just does nothing — no
-      # error — so it's safe to leave in permanently.
+      # Kept for backward compatibility / for updating just binary assets
+      # without re-uploading the whole project.zip. Superseded by
+      # project.zip above for everyday use, since project.zip already
+      # includes src/assets/ directly — but harmless to leave in.
       - name: Unpack assets.zip if present
         run: |
           if [ -f assets.zip ]; then
