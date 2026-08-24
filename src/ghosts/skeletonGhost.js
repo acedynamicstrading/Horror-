@@ -137,14 +137,22 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onNeedFlee
   // no rescaling needed. If it looks off-scale on device, adjust here.
   root.scale.setScalar(1)
 
-  // Grab a few real bones to wiggle procedurally — picked for visible,
-  // "wrong" looking motion (spine twist, one arm dragging, head jitter)
-  // rather than a full walk cycle, since this is a crawl/lurch, not
-  // locomotion.
-  const spine = findBone(root, 'CC_Base_Spine02')
+  // Grab real bones to pose/wiggle procedurally. Picked for a convincing
+  // crawl silhouette (bent legs, hunched spine, dragging arms), not just
+  // arm/head twitch — a few degrees of oscillation around the rig's default
+  // STANDING rest pose reads as "stiff figure standing there jittering,"
+  // not "crawling." The fix is a real bent BASE pose (large fixed offsets
+  // below), with the twitch oscillation layered on top of that, not in
+  // place of it.
+  const spine01 = findBone(root, 'CC_Base_Spine01')
+  const spine02 = findBone(root, 'CC_Base_Spine02')
   const headBone = findBone(root, 'CC_Base_Head')
   const armL = findBone(root, 'CC_Base_L_Upperarm')
   const armR = findBone(root, 'CC_Base_R_Upperarm')
+  const thighL = findBone(root, 'CC_Base_L_Thigh')
+  const thighR = findBone(root, 'CC_Base_R_Thigh')
+  const calfL = findBone(root, 'CC_Base_L_Calf')
+  const calfR = findBone(root, 'CC_Base_R_Calf')
 
   let state = 'idle'
   let elapsed = 0
@@ -192,11 +200,39 @@ export const createSkeletonGhostInstance = (template, { onRevealPeak, onNeedFlee
     root.lookAt(faceTarget)
   }
 
+  // BASE crawl pose — fixed offsets from the rig's standing rest pose,
+  // applied every frame regardless of twitch intensity, so the silhouette
+  // reads as "hunched, bent-limbed, crawling" even at the very first frame
+  // of emergence, not just once oscillation has had time to move anything.
+  // Twitch (below) adds jitter ON TOP of this, it doesn't replace it.
+  const applyCrawlPose = (intensity) => {
+    // Spine hunched forward and low.
+    if (spine01) spine01.rotation.x = 0.55 * intensity
+    if (spine02) spine02.rotation.x = 0.45 * intensity
+    if (headBone) headBone.rotation.x = 0.3 * intensity
+
+    // Arms bent forward/down, like dragging the body along the surface.
+    if (armL) armL.rotation.x = -1.1 * intensity
+    if (armR) armR.rotation.x = -1.1 * intensity
+    if (armL) armL.rotation.z = 0.25 * intensity
+    if (armR) armR.rotation.z = -0.25 * intensity
+
+    // Legs bent at hip and knee — a standing T/A-pose leg reads as "just
+    // standing there"; a bent one reads as "climbing/crawling out."
+    if (thighL) thighL.rotation.x = 0.9 * intensity
+    if (thighR) thighR.rotation.x = 0.7 * intensity
+    if (calfL) calfL.rotation.x = -1.3 * intensity
+    if (calfR) calfR.rotation.x = -1.0 * intensity
+  }
+
   const applyTwitch = (intensity) => {
-    if (spine) spine.rotation.z = Math.sin(elapsed * 14) * 0.12 * intensity
-    if (headBone) headBone.rotation.y = Math.sin(elapsed * 9 + 1) * 0.25 * intensity
-    if (armL) armL.rotation.x = -0.4 + Math.sin(elapsed * 11) * 0.3 * intensity
-    if (armR) armR.rotation.x = -0.6 + Math.cos(elapsed * 12) * 0.25 * intensity
+    applyCrawlPose(Math.min(1, intensity + 0.3)) // base pose stays mostly bent even at low twitch intensity
+    if (spine02) spine02.rotation.z += Math.sin(elapsed * 14) * 0.14 * intensity
+    if (headBone) headBone.rotation.y = Math.sin(elapsed * 9 + 1) * 0.3 * intensity
+    if (armL) armL.rotation.x += Math.sin(elapsed * 11) * 0.25 * intensity
+    if (armR) armR.rotation.x += Math.cos(elapsed * 12) * 0.22 * intensity
+    if (thighL) thighL.rotation.z = Math.sin(elapsed * 7) * 0.15 * intensity
+    if (thighR) thighR.rotation.z = Math.cos(elapsed * 7.5) * 0.15 * intensity
   }
 
   const update = (delta, cameraPosition) => {
