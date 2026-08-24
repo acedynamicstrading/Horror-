@@ -47,7 +47,13 @@ const SAMPLES_PER_TICK = 1 // keep cheap; called every onUpdate
 // and walls are required just to start the game.
 const FLOOR_BAND = 0.15 // within this of the floor estimate = floor
 const FURNITURE_MAX_HEIGHT = 0.85 // above FLOOR_BAND, up to this height = furniture
-// anything higher than FURNITURE_MAX_HEIGHT above the floor estimate = wall
+// Above FURNITURE_MAX_HEIGHT, up to CEILING_MIN_HEIGHT = normal wall (roughly
+// eye/chest height for the classic "emerges from the wall in front of you").
+// At or above CEILING_MIN_HEIGHT = 'ceiling' — genuinely up and out of a
+// player's normal forward gaze, which is specifically what spiders want (see
+// crawlSpider spawn-zone preference in app.js): a player looking straight
+// ahead shouldn't see it coming, only spotting it if they tilt the phone up.
+const CEILING_MIN_HEIGHT = 1.85
 
 const up = new THREE.Vector3(0, 1, 0)
 const tmpNormal = new THREE.Vector3()
@@ -72,6 +78,7 @@ const classifySurface = (hitResult, lowestY) => {
   const height = hitResult.position.y - lowestY
   if (height <= FLOOR_BAND) return 'floor'
   if (height <= FURNITURE_MAX_HEIGHT) return 'furniture'
+  if (height >= CEILING_MIN_HEIGHT) return 'ceiling'
   return 'wall'
 }
 
@@ -79,7 +86,7 @@ const isFarEnoughFromPool = (pool, position) =>
   pool.every((p) => p.position.distanceTo(position) > MIN_POINT_SPACING)
 
 export const createSurfaceSampler = () => {
-  const pools = { wall: [], floor: [], furniture: [], other: [] }
+  const pools = { wall: [], ceiling: [], floor: [], furniture: [], other: [] }
   let hasLoggedSample = false
   // Running floor-height estimate — updated from EVERY hit we see (not just
   // ones already classified as floor), so the height-based fallback can
@@ -93,7 +100,7 @@ export const createSurfaceSampler = () => {
   // Not the same as poolSizes() — this counts every classification attempt,
   // including near-duplicates the dedup spacing check throws away, so it
   // reflects the raw height distribution, not just what made it into a pool.
-  let classificationTally = { wall: 0, floor: 0, furniture: 0, other: 0 }
+  let classificationTally = { wall: 0, ceiling: 0, floor: 0, furniture: 0, other: 0 }
   let totalClassified = 0
   let hasLoggedTally = false
   const TALLY_LOG_AT = 60
@@ -158,6 +165,12 @@ export const createSurfaceSampler = () => {
     if (hit.rotation && hit.type === 'ESTIMATED_SURFACE') {
       tmpQuat.set(hit.rotation.x, hit.rotation.y, hit.rotation.z, hit.rotation.w)
       normal = new THREE.Vector3(0, 1, 0).applyQuaternion(tmpQuat).clone()
+    } else if (type === 'ceiling') {
+      // The ceiling's outward-facing surface points DOWN into the room —
+      // this is what makes a spider emerge downward out of the ceiling
+      // toward the player, instead of the horizontal "out of the wall"
+      // direction used below.
+      normal = new THREE.Vector3(0, -1, 0)
     } else if (type === 'wall' || type === 'furniture') {
       normal = new THREE.Vector3(position.x, 0, position.z)
       if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
@@ -174,7 +187,7 @@ export const createSurfaceSampler = () => {
   const getRandomPoint = (type = 'any') => {
     let pool
     if (type === 'any') {
-      pool = [...pools.wall, ...pools.floor, ...pools.furniture, ...pools.other]
+      pool = [...pools.wall, ...pools.ceiling, ...pools.floor, ...pools.furniture, ...pools.other]
     } else {
       pool = pools[type]
     }
@@ -189,7 +202,7 @@ export const createSurfaceSampler = () => {
   const getRandomPointExcluding = (type = 'any', excludePosition, minDistance = 0.8) => {
     let pool
     if (type === 'any') {
-      pool = [...pools.wall, ...pools.floor, ...pools.furniture, ...pools.other]
+      pool = [...pools.wall, ...pools.ceiling, ...pools.floor, ...pools.furniture, ...pools.other]
     } else {
       pool = pools[type] || []
     }
@@ -201,6 +214,7 @@ export const createSurfaceSampler = () => {
 
   const poolSizes = () => ({
     wall: pools.wall.length,
+    ceiling: pools.ceiling.length,
     floor: pools.floor.length,
     furniture: pools.furniture.length,
     other: pools.other.length,
@@ -211,14 +225,26 @@ export const createSurfaceSampler = () => {
   // points may no longer correspond to real anchored positions.
   const reset = () => {
     pools.wall.length = 0
+    pools.ceiling.length = 0
     pools.floor.length = 0
     pools.furniture.length = 0
     pools.other.length = 0
     lowestY = null
-    classificationTally = { wall: 0, floor: 0, furniture: 0, other: 0 }
+    classificationTally = { wall: 0, ceiling: 0, floor: 0, furniture: 0, other: 0 }
     totalClassified = 0
     hasLoggedTally = false
   }
 
-  return { update, getRandomPoint, getRandomPointExcluding, poolSizes, reset }
+  // Externally-supplied point from REAL furniture detection (see
+  // furnitureDetector.js), as opposed to the height-band guess above. Kept
+  // in the same 'furniture' pool since spawn logic already draws from it —
+  // real detections are simply mixed in alongside the height-based guesses,
+  // both usable as "furniture" anchor points.
+  const addDetectedFurniturePoint = (position, normal, label) => {
+    if (pools.furniture.length >= MAX_POOL_SIZE) return
+    if (!isFarEnoughFromPool(pools.furniture, position)) return
+    pools.furniture.push({ position, normal: normal.clone(), type: 'furniture', label })
+  }
+
+  return { update, getRandomPoint, getRandomPointExcluding, poolSizes, reset, addDetectedFurniturePoint }
 }

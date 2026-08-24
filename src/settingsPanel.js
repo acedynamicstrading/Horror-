@@ -11,7 +11,7 @@
 // and its reticle/shutter elements.
 // ---------------------------------------------------------------------------
 
-const STORAGE_KEY = 'ahh_settings_v1'
+const STORAGE_KEY = 'ahh_settings_v2' // bumped from v1 — see app.js's onRender comment: a stale, much-darker v1 value was silently overriding the current lighter defaults on every reload
 
 const DEFAULTS = {
   brightness: 0.55, // 0..1 -> hauntedShader.js's shadow-lift strength

@@ -11,6 +11,7 @@ import { createBleedingWalls } from './effects/bleedingWalls'
 import { createHauntedFurniture } from './effects/hauntedFurniture'
 import { createAudioManager } from './spatialAudio'
 import { initSettingsPanel } from './settingsPanel'
+import { loadFurnitureDetector, requestFurnitureDetection } from './furnitureDetector'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -92,6 +93,8 @@ const initScenePipelineModule = () => {
   let hasLoggedTrackingSample = false
   let hasLoggedRawProcessCpu = false
   let hasLoggedRealitySample = false
+  let hasLoggedPixelArraySample = false
+  let hasLoggedPixelArrayError = false
 
   // Drives how often the room's haunting (bleeding walls, furniture decay)
   // escalates. Local to this module rather than gameState.js, since
@@ -138,24 +141,58 @@ const initScenePipelineModule = () => {
   const SPIDER_POOL_SIZE = 3
   const ghostPool = []
 
-  const getIdleGhost = () => ghostPool.find((g) => !g.isActive())
+  // .find() would always return the FIRST idle match in array order — and
+  // since spiders are built synchronously (pushed into ghostPool immediately
+  // in onStart) while the skeleton loads asynchronously over the network
+  // (pushed in a second or two later, appended AFTER the spiders), spiders
+  // permanently occupy the front of the array. That meant the skeleton only
+  // ever got picked on the rare frame where all 3 spiders happened to be
+  // active at once — in practice, "the skeleton never spawns." Picking
+  // randomly among whatever's actually idle fixes that regardless of load
+  // order or how many entity types get added later.
+  const getIdleGhost = () => {
+    const idle = ghostPool.filter((g) => !g.isActive())
+    if (idle.length === 0) return null
+    return idle[Math.floor(Math.random() * idle.length)]
+  }
 
   // `opts.isRefind` comes from scareScheduler: true when this spawn point
   // was drawn from the fledTargets queue (a specific location awaiting
   // re-find), false for a fresh first-ever reveal. Passed straight through
   // to the ghost instance, which is what actually gates isCapturable().
+  //
+  // Per entity-type spawn zones: spiders ambush from ceiling/high points
+  // (a player looking straight ahead at normal eye level genuinely won't
+  // see it coming — they have to tilt the phone up), skeletons emerge from
+  // wall/furniture points (normal eye-level walls, corners, around
+  // furniture). This only re-picks the point for a FRESH spawn — a re-find
+  // (opts.isRefind) must reuse the EXACT point it originally fled to, or
+  // "go back to where you saw it" stops meaning anything.
   const spawnGhostAt = (point, opts = {}) => {
     const ghost = getIdleGhost()
     if (!ghost) return // all ghosts already active — skip this scare attempt
-    const normal = point.normal || new THREE.Vector3(0, 1, 0)
-    ghost.spawnAt(point.position, normal, opts)
+
+    let usePoint = point
+    if (!opts.isRefind) {
+      const zonePool = ghost.kind === 'spider' ? 'ceiling' : 'wall'
+      const zonePoint =
+        surfaceSampler.getRandomPoint(zonePool) ||
+        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('furniture') : null)
+      // Fall back to whatever the scheduler originally picked if this
+      // entity's preferred zone hasn't been scanned yet — better to spawn
+      // somewhere than not spawn at all.
+      if (zonePoint) usePoint = zonePoint
+    }
+
+    const normal = usePoint.normal || new THREE.Vector3(0, 1, 0)
+    ghost.spawnAt(usePoint.position, normal, opts)
 
     // A fresh (non-refind) emergence is a real "something just appeared"
     // moment — occasionally tie a nearby wall bleed to it so the room
     // reacts to what's happening instead of bleeding on a fully
     // independent schedule.
     if (!opts.isRefind && bleedingWalls && Math.random() < BLEED_ON_EMERGE_CHANCE) {
-      bleedingWalls.spawnNear(point)
+      bleedingWalls.spawnNear(usePoint)
     }
   }
 
@@ -250,6 +287,7 @@ const initScenePipelineModule = () => {
               },
             })
             scene.add(ghost.mesh)
+            ghost.kind = 'skeleton'
             ghostPool.push(ghost)
           }
           debugLog(`Skeleton ghost model loaded — pool of ${GHOST_POOL_SIZE} ready.`)
@@ -257,6 +295,15 @@ const initScenePipelineModule = () => {
         .catch((err) => {
           debugLog(`Failed to load skeleton ghost model: ${err.message || err}`)
         })
+
+      // Loads MediaPipe's Object Detector model in the background — not
+      // needed until the first onUpdate tick during SCANNING, so no need to
+      // block anything on it. Failures here degrade gracefully: furniture
+      // classification just falls back to the height-band guess in
+      // surfaceSampler.js, nothing crashes.
+      loadFurnitureDetector()
+        .then(() => debugLog('Furniture object detector loaded.'))
+        .catch((err) => debugLog(`Failed to load furniture detector: ${err.message || err}`))
 
       surfaceSampler = createSurfaceSampler()
 
@@ -306,6 +353,7 @@ const initScenePipelineModule = () => {
           },
         })
         scene.add(spider.mesh)
+        spider.kind = 'spider'
         ghostPool.push(spider)
       }
       debugLog(`Spider pool of ${SPIDER_POOL_SIZE} ready.`)
@@ -435,6 +483,50 @@ const initScenePipelineModule = () => {
         debugLog(`processCpuResult top-level keys: ${JSON.stringify(processCpuResult ? Object.keys(processCpuResult) : null)}`)
       }
 
+      // ---- furniture object detection (MediaPipe, fed from 8th Wall's own
+      // camera frame via CameraPixelArray — see furnitureDetector.js) ----
+      // Only runs during SCANNING: furniture doesn't move once found, so
+      // there's no value paying the inference cost continuously through
+      // ACTIVE gameplay. requestFurnitureDetection() self-throttles
+      // internally on top of this gate.
+      const pixelData = processCpuResult && processCpuResult.camerapixelarray
+      if (!hasLoggedPixelArraySample) {
+        hasLoggedPixelArraySample = true
+        debugLog(
+          pixelData
+            ? `First camerapixelarray sample (from onUpdate): rows=${pixelData.rows} cols=${pixelData.cols} bytes=${pixelData.pixels ? pixelData.pixels.length : 'n/a'}`
+            : 'camerapixelarray absent from onUpdate\'s processCpuResult — furniture detection has no frames to work with. Check whether CameraPixelArray\'s output actually lands one stage earlier, on onProcessCpu, matching 8th Wall\'s own QR-scan example (this project has seen reality data land one stage later than docs suggested before, so the opposite is also possible here).',
+        )
+      }
+      if (pixelData && gameState.getState() === GameStates.SCANNING) {
+        const detections = requestFurnitureDetection(pixelData)
+        for (const det of detections) {
+          if (det.error) {
+            if (!hasLoggedPixelArrayError) {
+              hasLoggedPixelArrayError = true
+              debugLog(`Furniture detector: ${det.error}`)
+            }
+            continue
+          }
+          const results = window.XR8.XrController.hitTest(
+            det.normalizedCenter.x,
+            det.normalizedCenter.y,
+            ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
+          )
+          if (results && results.length > 0) {
+            const hit = results[0]
+            const position = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
+            // No reliable surface normal for a mid-air object detection hit —
+            // point outward from room-center-ish (same fallback surfaceSampler
+            // itself uses for wall/furniture points).
+            const normal = new THREE.Vector3(position.x, 0, position.z)
+            if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
+            normal.normalize()
+            surfaceSampler.addDetectedFurniturePoint(position, normal, det.label)
+          }
+        }
+      }
+
       surfaceSampler.update()
       gameState.update(delta)
 
@@ -498,18 +590,8 @@ const initScenePipelineModule = () => {
     // what ends up on screen, instead of getting overwritten by the plain
     // render that happens right after onUpdate.
     onRender: () => {
-      // Disabled again — still reading as too dark on-device even after
-      // the retune (lighter baseline exposure, softer vignette/desaturation
-      // in hauntedShader.js). Likely cause, worth checking before
-      // retuning further: settingsPanel.js persists to localStorage under
-      // the key 'ahh_settings_v1', and that key never changed — so if an
-      // earlier, darker version of the shader was ever tested in this
-      // browser, the OLD saved values are still being loaded over the new,
-      // lighter DEFAULTS every time the page loads. Confirm by opening the
-      // in-game Settings panel and dragging Brightness up manually; if
-      // that visibly helps, bump STORAGE_KEY in settingsPanel.js (e.g. to
-      // 'ahh_settings_v2') so stale saved values get discarded, then
-      // re-enable this line.
+      // Intentionally disabled — kept off on purpose (too dark), not a bug.
+      // Do not re-enable without being asked.
       // if (hauntedVision) hauntedVision.render()
     },
   }
@@ -526,6 +608,12 @@ const onxrloaded = () => {
       window.XR8.GlTextureRenderer.pipelineModule(),
       window.XR8.Threejs.pipelineModule(),
       window.XR8.XrController.pipelineModule(),
+      // Provides camera frames to furnitureDetector.js without opening a
+      // second camera stream — 8th Wall's own documented pattern for
+      // feeding external CV libraries (their own example is a QR scanner
+      // built this exact way). Kept at a modest resolution since this
+      // still costs real CPU/GPU time on top of SLAM + rendering.
+      window.XR8.CameraPixelArray.pipelineModule({ luminance: false, maxDimension: 320 }),
       initScenePipelineModule(),
     ])
 
