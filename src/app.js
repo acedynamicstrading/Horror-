@@ -138,6 +138,10 @@ const initScenePipelineModule = () => {
   // captureSystem.js/gameState.js/scareSystem.js never need to know two
   // entity types exist.
   const GHOST_POOL_SIZE = 3
+  // Human eye-level cap for skeleton wall/furniture spawns — see the
+  // comment in spawnGhostAt for why fixed absolute wall-band heights alone
+  // aren't enough in unusually tall rooms.
+  const SKELETON_MAX_HEIGHT = 1.6
   const SPIDER_POOL_SIZE = 3
   const ghostPool = []
 
@@ -174,10 +178,33 @@ const initScenePipelineModule = () => {
 
     let usePoint = point
     if (!opts.isRefind) {
-      const zonePool = ghost.kind === 'spider' ? 'ceiling' : 'wall'
+      // Skeletons split between wall/furniture emergence and floor spawns
+      // (floor: rises, then walks toward the player on re-find — see
+      // skeletonGhost.js). Spiders mostly ambush from the ceiling, but
+      // sometimes spawn on a wall/floor instead, where re-finds dart
+      // toward the player in bursts (see crawlSpider.js) instead of the
+      // ceiling-only anchor skitter.
+      const preferredZone =
+        ghost.kind === 'spider'
+          ? Math.random() < 0.7
+            ? 'ceiling'
+            : Math.random() < 0.5
+              ? 'floor'
+              : 'wall'
+          : Math.random() < 0.5
+            ? 'floor'
+            : 'wall'
+      // SKELETON_MAX_HEIGHT caps wall selection to a human eye-level band
+      // regardless of room height — fixes skeletons spawning uncomfortably
+      // close to the ceiling in unusually tall/vaulted rooms, where the
+      // full 0.85m-1.85m 'wall' band's upper end can still look "stuck at
+      // the top" on screen even though it's technically a valid wall point.
+      // Doesn't apply to floor points (they're near y=0 by definition).
+      const heightCap = ghost.kind === 'spider' || preferredZone === 'floor' ? null : SKELETON_MAX_HEIGHT
       const zonePoint =
-        surfaceSampler.getRandomPoint(zonePool) ||
-        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('furniture') : null)
+        surfaceSampler.getRandomPoint(preferredZone, heightCap) ||
+        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('wall', SKELETON_MAX_HEIGHT) : null) ||
+        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('furniture', SKELETON_MAX_HEIGHT) : null)
       // Fall back to whatever the scheduler originally picked if this
       // entity's preferred zone hasn't been scanned yet — better to spawn
       // somewhere than not spawn at all.
@@ -185,7 +212,10 @@ const initScenePipelineModule = () => {
     }
 
     const normal = usePoint.normal || new THREE.Vector3(0, 1, 0)
-    ghost.spawnAt(usePoint.position, normal, opts)
+    debugLog(
+      `Spawning ${ghost.kind} at type=${usePoint.type || 'unknown'} height=${usePoint.heightAboveFloor != null ? usePoint.heightAboveFloor.toFixed(2) + 'm' : 'n/a'} isRefind=${!!opts.isRefind}`,
+    )
+    ghost.spawnAt(usePoint.position, normal, { ...opts, pointType: usePoint.type })
 
     // A fresh (non-refind) emergence is a real "something just appeared"
     // moment — occasionally tie a nearby wall bleed to it so the room
@@ -273,6 +303,9 @@ const initScenePipelineModule = () => {
           for (let i = 0; i < GHOST_POOL_SIZE; i++) {
             const ghost = createSkeletonGhostInstance(template, {
               onRevealPeak: () => hauntedVision.flash(450),
+              onFootstep: (position) => {
+                if (audio) audio.playPositionalOneShot('footstep', position, { volume: 0.7, refDistance: 0.6, maxDistance: 6 })
+              },
               // Asked only on a scare-only first reveal, once it's ready to
               // duck away. Excludes the point it's currently at so "flee"
               // actually means somewhere else, not a near-duplicate spot.
@@ -315,7 +348,7 @@ const initScenePipelineModule = () => {
       // path yet, spatialAudio.js's requireBuffer() just warns and no-ops
       // on playback rather than throwing, so this never blocks scene setup.
       audio = createAudioManager({ camera })
-      audio.load({ wallDrip: '/audio/wall-drip.mp3' }).catch((err) => {
+      audio.load({ wallDrip: '/audio/wall-drip.mp3', footstep: '/audio/entity-footstep.mp3' }).catch((err) => {
         debugLog(`spatialAudio: wallDrip failed to load (expected until a real file is added at /audio/wall-drip.mp3): ${err.message}`)
       })
 
@@ -346,6 +379,9 @@ const initScenePipelineModule = () => {
         const spider = createCrawlSpider({
           seed: i + 1,
           onRevealPeak: () => hauntedVision.flash(450),
+          onFootstep: (position) => {
+            if (audio) audio.playPositionalOneShot('footstep', position, { volume: 0.5, refDistance: 0.4, maxDistance: 5 })
+          },
           onNeedFleeTarget: (currentPoint) =>
             surfaceSampler.getRandomPointExcluding('any', currentPoint, 0.8),
           onDespawn: ({ fledTo } = {}) => {
@@ -554,11 +590,17 @@ const initScenePipelineModule = () => {
         hasLoggedPixelArraySample = true
         debugLog(
           pixelData
-            ? `First camerapixelarray sample (from onProcessCpu): rows=${pixelData.rows} cols=${pixelData.cols} bytes=${pixelData.pixels ? pixelData.pixels.length : 'n/a'}`
+            ? 'camerapixelarray found on processGpuResult (from onProcessCpu) — see furnitureDetector.js\'s own raw-key dump for its actual field names.'
             : 'camerapixelarray absent from onProcessCpu\'s processGpuResult too — check the CameraPixelArray module is actually registered before this one in addCameraPipelineModules.',
         )
       }
-      if (pixelData && gameState.getState() === GameStates.SCANNING) {
+      // Runs continuously (not just during initial SCANNING) — furniture
+      // can be discovered any time the player explores a new area, walks
+      // into an adjacent room, etc. Self-throttled internally (see
+      // furnitureDetector.js) so running continuously doesn't mean running
+      // every frame — only GLITCHING is excluded, since there's no
+      // meaningful "new furniture" moment while that narrative beat plays.
+      if (pixelData && gameState.getState() !== GameStates.GLITCHING) {
         const detections = requestFurnitureDetection(pixelData)
         for (const det of detections) {
           if (det.error) {
