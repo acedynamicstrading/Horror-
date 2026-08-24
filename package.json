@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@8thwall/engine-binary": "^1.0.0",
+    "@mediapipe/tasks-vision": "^1.0.1",
     "three": "^0.160.0"
   },
   "devDependencies": {
