@@ -88,11 +88,34 @@ const isFarEnoughFromPool = (pool, position) =>
 export const createSurfaceSampler = () => {
   const pools = { wall: [], ceiling: [], floor: [], furniture: [], other: [] }
   let hasLoggedSample = false
-  // Running floor-height estimate — updated from EVERY hit we see (not just
-  // ones already classified as floor), so the height-based fallback can
-  // bootstrap itself instead of waiting on a genuinely-classified floor
-  // point first. Self-corrects downward as better (lower) points arrive.
-  let lowestY = null
+  // Running floor-height estimate. NOT a simple running minimum anymore —
+  // that was a real bug: a single noisy/mistracked SLAM point (which does
+  // happen, especially with fast phone motion or early in a session) would
+  // permanently corrupt the estimate downward forever, since a strict min
+  // can never recover upward. Confirmed on-device: floor estimates of
+  // y=-14.75 and y=-5.05 in the same normal room, and one hit logged at
+  // "73.60m above floor" — impossible for a real room, and it cascaded into
+  // almost everything misclassifying as 'ceiling' since height is measured
+  // relative to that broken estimate.
+  //
+  // Fix: keep a small buffer of the lowest few Y values ever seen, and use
+  // the MEDIAN of that buffer rather than the single lowest. A lone bad
+  // outlier can occupy one slot in the buffer without dominating the median;
+  // it takes multiple low points agreeing before the estimate actually moves.
+  const LOW_BUFFER_SIZE = 7
+  let lowYBuffer = []
+
+  const updateFloorEstimate = (y) => {
+    lowYBuffer.push(y)
+    lowYBuffer.sort((a, b) => a - b)
+    if (lowYBuffer.length > LOW_BUFFER_SIZE) lowYBuffer.length = LOW_BUFFER_SIZE
+  }
+
+  const getFloorEstimate = () => {
+    if (lowYBuffer.length === 0) return null
+    const mid = Math.floor(lowYBuffer.length / 2)
+    return lowYBuffer[mid] // median of the low cluster, not the single lowest
+  }
 
   // One-time tally logged once enough hits have come in, so the real
   // FEATURE_POINT height distribution (and how it split across the new 0.85m
@@ -128,9 +151,8 @@ export const createSurfaceSampler = () => {
       }
     }
 
-    if (lowestY === null || hit.position.y < lowestY) {
-      lowestY = hit.position.y
-    }
+    updateFloorEstimate(hit.position.y)
+    const lowestY = getFloorEstimate()
 
     const type = classifySurface(hit, lowestY)
 
@@ -141,7 +163,7 @@ export const createSurfaceSampler = () => {
       const heightAbove = (hit.position.y - lowestY).toFixed(2)
       window.debugLog(
         `Surface classification tally after ${totalClassified} hits: ${JSON.stringify(classificationTally)}\n` +
-        `(floor est. y=${lowestY.toFixed(2)}, most recent hit height above floor=${heightAbove}m, furniture/wall boundary=${FURNITURE_MAX_HEIGHT}m)`
+        `(floor est. y=${lowestY.toFixed(2)} [median of lowest ${lowYBuffer.length} samples: ${lowYBuffer.map(v => v.toFixed(2))}], most recent hit height above floor=${heightAbove}m, furniture/wall boundary=${FURNITURE_MAX_HEIGHT}m)`
       )
     }
 
@@ -229,7 +251,7 @@ export const createSurfaceSampler = () => {
     pools.floor.length = 0
     pools.furniture.length = 0
     pools.other.length = 0
-    lowestY = null
+    lowYBuffer = []
     classificationTally = { wall: 0, ceiling: 0, floor: 0, furniture: 0, other: 0 }
     totalClassified = 0
     hasLoggedTally = false

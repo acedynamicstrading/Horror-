@@ -483,50 +483,6 @@ const initScenePipelineModule = () => {
         debugLog(`processCpuResult top-level keys: ${JSON.stringify(processCpuResult ? Object.keys(processCpuResult) : null)}`)
       }
 
-      // ---- furniture object detection (MediaPipe, fed from 8th Wall's own
-      // camera frame via CameraPixelArray — see furnitureDetector.js) ----
-      // Only runs during SCANNING: furniture doesn't move once found, so
-      // there's no value paying the inference cost continuously through
-      // ACTIVE gameplay. requestFurnitureDetection() self-throttles
-      // internally on top of this gate.
-      const pixelData = processCpuResult && processCpuResult.camerapixelarray
-      if (!hasLoggedPixelArraySample) {
-        hasLoggedPixelArraySample = true
-        debugLog(
-          pixelData
-            ? `First camerapixelarray sample (from onUpdate): rows=${pixelData.rows} cols=${pixelData.cols} bytes=${pixelData.pixels ? pixelData.pixels.length : 'n/a'}`
-            : 'camerapixelarray absent from onUpdate\'s processCpuResult — furniture detection has no frames to work with. Check whether CameraPixelArray\'s output actually lands one stage earlier, on onProcessCpu, matching 8th Wall\'s own QR-scan example (this project has seen reality data land one stage later than docs suggested before, so the opposite is also possible here).',
-        )
-      }
-      if (pixelData && gameState.getState() === GameStates.SCANNING) {
-        const detections = requestFurnitureDetection(pixelData)
-        for (const det of detections) {
-          if (det.error) {
-            if (!hasLoggedPixelArrayError) {
-              hasLoggedPixelArrayError = true
-              debugLog(`Furniture detector: ${det.error}`)
-            }
-            continue
-          }
-          const results = window.XR8.XrController.hitTest(
-            det.normalizedCenter.x,
-            det.normalizedCenter.y,
-            ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
-          )
-          if (results && results.length > 0) {
-            const hit = results[0]
-            const position = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
-            // No reliable surface normal for a mid-air object detection hit —
-            // point outward from room-center-ish (same fallback surfaceSampler
-            // itself uses for wall/furniture points).
-            const normal = new THREE.Vector3(position.x, 0, position.z)
-            if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
-            normal.normalize()
-            surfaceSampler.addDetectedFurniturePoint(position, normal, det.label)
-          }
-        }
-      }
-
       surfaceSampler.update()
       gameState.update(delta)
 
@@ -572,12 +528,60 @@ const initScenePipelineModule = () => {
     // it only becomes available to other modules at the NEXT stage, onUpdate
     // — via processCpuResult.reality there. So all of this actually lives in
     // onUpdate below now, not here.
-    onProcessCpu: (processCpuResult) => {
+    //
+    // camerapixelarray is DIFFERENT, though — confirmed on-device it's
+    // genuinely absent from onUpdate's processCpuResult. It follows 8th
+    // Wall's documented pattern exactly (their own QR-scan example): it's
+    // produced by CameraPixelArray's onProcessGpu, and becomes available to
+    // THIS stage (onProcessCpu) via the processGpuResult key on this
+    // function's own argument — i.e. one stage EARLIER than `reality`, not
+    // the same stage. Two different pieces of 8th Wall data landing at two
+    // different, non-obvious stages — don't assume they behave the same way.
+    onProcessCpu: ({ processGpuResult }) => {
       if (!gameState) return
       if (!hasLoggedRawProcessCpu) {
         hasLoggedRawProcessCpu = true
-        const topKeys = processCpuResult ? Object.keys(processCpuResult) : null
-        debugLog(`RAW onProcessCpu argument keys (this is INPUT to the stage, not reality): ${JSON.stringify(topKeys)}`)
+        const topKeys = processGpuResult ? Object.keys(processGpuResult) : null
+        debugLog(`RAW onProcessCpu processGpuResult keys: ${JSON.stringify(topKeys)}`)
+      }
+
+      // ---- furniture object detection ----
+      // Only during SCANNING (furniture doesn't move once found — no value
+      // paying the inference cost through ACTIVE gameplay). Self-throttled
+      // internally on top of this gate (see furnitureDetector.js).
+      const pixelData = processGpuResult && processGpuResult.camerapixelarray
+      if (!hasLoggedPixelArraySample) {
+        hasLoggedPixelArraySample = true
+        debugLog(
+          pixelData
+            ? `First camerapixelarray sample (from onProcessCpu): rows=${pixelData.rows} cols=${pixelData.cols} bytes=${pixelData.pixels ? pixelData.pixels.length : 'n/a'}`
+            : 'camerapixelarray absent from onProcessCpu\'s processGpuResult too — check the CameraPixelArray module is actually registered before this one in addCameraPipelineModules.',
+        )
+      }
+      if (pixelData && gameState.getState() === GameStates.SCANNING) {
+        const detections = requestFurnitureDetection(pixelData)
+        for (const det of detections) {
+          if (det.error) {
+            if (!hasLoggedPixelArrayError) {
+              hasLoggedPixelArrayError = true
+              debugLog(`Furniture detector: ${det.error}`)
+            }
+            continue
+          }
+          const results = window.XR8.XrController.hitTest(
+            det.normalizedCenter.x,
+            det.normalizedCenter.y,
+            ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
+          )
+          if (results && results.length > 0) {
+            const hit = results[0]
+            const position = new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z)
+            const normal = new THREE.Vector3(position.x, 0, position.z)
+            if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
+            normal.normalize()
+            surfaceSampler.addDetectedFurniturePoint(position, normal, det.label)
+          }
+        }
       }
     },
 
