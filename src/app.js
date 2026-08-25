@@ -12,6 +12,7 @@ import { createHauntedFurniture } from './effects/hauntedFurniture'
 import { createAudioManager } from './spatialAudio'
 import { initSettingsPanel } from './settingsPanel'
 import { loadFurnitureDetector, requestFurnitureDetection } from './furnitureDetector'
+import { createEnvironmentModel } from './environmentModel'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -87,6 +88,8 @@ const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
   let surfaceSampler, scareScheduler, gameState, captureSystem, residueField
   let bleedingWalls, hauntedFurniture, audio
+  let environmentModel
+  let envSummaryTimer = 0
   let residueSpawnClock = 0
   let clock
   let lastTrackingStatus = null
@@ -339,6 +342,11 @@ const initScenePipelineModule = () => {
         .catch((err) => debugLog(`Failed to load furniture detector: ${err.message || err}`))
 
       surfaceSampler = createSurfaceSampler()
+      // Standalone diagnostic system for now — deliberately NOT wired into
+      // spawning/gameplay yet. Runs its own independent sampling; the
+      // debug summary below is what to check on-device before trusting
+      // this for anything.
+      environmentModel = createEnvironmentModel()
 
       // spatialAudio.js's manager — wired into app.js for the first time
       // (the module existed but nothing instantiated it before). Only the
@@ -522,6 +530,15 @@ const initScenePipelineModule = () => {
       surfaceSampler.update()
       gameState.update(delta)
 
+      if (environmentModel) {
+        environmentModel.update()
+        envSummaryTimer += delta
+        if (envSummaryTimer >= 5) {
+          envSummaryTimer = 0
+          debugLog(environmentModel.debugSummary())
+        }
+      }
+
       // Drip-feed residue decals from whatever's already been scanned —
       // throttled (not every frame) and self-limiting (hauntedResidue.js
       // caps total count + dedups near-duplicate spots), so the room
@@ -610,6 +627,16 @@ const initScenePipelineModule = () => {
             }
             continue
           }
+          if (det.type === 'person') {
+            // Deliberately NOT fed into surfaceSampler's static furniture
+            // points — a person moves, so caching their position the way
+            // furniture is cached would be wrong the instant they take a
+            // step. No gameplay behavior wired to this yet; logged only,
+            // as a first checkpoint before deciding what a detected person
+            // should actually do in-scene.
+            debugLog(`Person detected at normalized (${det.normalizedCenter.x.toFixed(2)}, ${det.normalizedCenter.y.toFixed(2)}), confidence=${det.confidence.toFixed(2)}`)
+            continue
+          }
           const results = window.XR8.XrController.hitTest(
             det.normalizedCenter.x,
             det.normalizedCenter.y,
@@ -693,6 +720,35 @@ if ('serviceWorker' in navigator) {
   })
 }
 
-window.XR8
-  ? onxrloaded()
-  : window.addEventListener('xrloaded', onxrloaded)
+const startXr = () => {
+  window.XR8
+    ? onxrloaded()
+    : window.addEventListener('xrloaded', onxrloaded)
+}
+
+const SAFETY_ACK_KEY = 'lens_safety_ack_v1'
+const safetyBackdrop = document.getElementById('safetyBackdrop')
+const safetyAck = document.getElementById('safetyAck')
+
+let alreadyAcknowledged = false
+try {
+  alreadyAcknowledged = localStorage.getItem(SAFETY_ACK_KEY) === '1'
+} catch (err) {
+  // Private/incognito mode can throw on localStorage access — fail safe by
+  // just showing the notice every time rather than crashing startup.
+}
+
+if (alreadyAcknowledged) {
+  safetyBackdrop.classList.add('hidden')
+  startXr()
+} else {
+  safetyAck.addEventListener('click', () => {
+    try {
+      localStorage.setItem(SAFETY_ACK_KEY, '1')
+    } catch (err) {
+      // Ignore — worst case the notice shows again next launch.
+    }
+    safetyBackdrop.classList.add('hidden')
+    startXr()
+  })
+}

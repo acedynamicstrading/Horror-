@@ -218,6 +218,53 @@
       height: 20px;
       accent-color: rgba(120, 220, 255, 0.9);
     }
+
+    /* --- Safety notice --- */
+    /* Shown once per browser (localStorage-gated, see app.js) before the
+       camera starts. Same visual language as #settingsPanel — a bottom
+       sheet, not a modal dialog — since it needs to feel like part of the
+       game's own chrome, not a browser permission prompt. */
+    #safetyBackdrop {
+      position: absolute;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      z-index: 10010;
+      display: flex;
+      align-items: flex-end;
+    }
+    #safetyBackdrop.hidden { display: none; }
+    #safetyPanel {
+      width: 100%;
+      background: rgba(15, 17, 18, 0.97);
+      border-top: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 16px 16px 0 0;
+      padding: 20px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+      font-family: -apple-system, sans-serif;
+      color: #eee;
+    }
+    #safetyPanel h2 {
+      font-size: 17px;
+      margin: 0 0 10px;
+    }
+    #safetyPanel p {
+      font-size: 14px;
+      line-height: 1.5;
+      color: rgba(238, 238, 238, 0.85);
+      margin: 0 0 8px;
+    }
+    #safetyAck {
+      width: 100%;
+      margin-top: 14px;
+      padding: 13px;
+      border-radius: 10px;
+      border: none;
+      background: rgba(120, 220, 255, 0.9);
+      color: #04202a;
+      font-size: 15px;
+      font-weight: 600;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #safetyAck:active { transform: scale(0.98); }
   </style>
 </head>
 <body>
@@ -271,5 +318,14 @@
   </div>
 
   <div id="debug"></div>
+
+  <div id="safetyBackdrop">
+    <div id="safetyPanel">
+      <h2>Before you start</h2>
+      <p>This game overlays your camera view — walls, furniture, and objects you see are the real room shown back to you, sometimes reskinned. Positions are approximate, not exact.</p>
+      <p>Play indoors only, in a space you know. Watch your surroundings, not just the screen, and go slowly — especially around furniture, stairs, and doorways.</p>
+      <button id="safetyAck">I understand, let's go</button>
+    </div>
+  </div>
 </body>
 </html>
