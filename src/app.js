@@ -87,11 +87,10 @@ const onGameStateChange = (state, gameStateApi) => {
 // ---------------------------------------------------------------------------
 const initScenePipelineModule = () => {
   let scene, camera, renderer, hauntedVision
+  let environmentModel, debugVisualizer
+  let envSummaryTimer = 0
   let surfaceSampler, scareScheduler, gameState, captureSystem, residueField
   let bleedingWalls, hauntedFurniture, audio
-  let environmentModel
-  let debugVisualizer
-  let envSummaryTimer = 0
   let residueSpawnClock = 0
   let clock
   let lastTrackingStatus = null
@@ -183,33 +182,16 @@ const initScenePipelineModule = () => {
 
     let usePoint = point
     if (!opts.isRefind) {
-      // Skeletons split between wall/furniture emergence and floor spawns
-      // (floor: rises, then walks toward the player on re-find — see
-      // skeletonGhost.js). Spiders mostly ambush from the ceiling, but
-      // sometimes spawn on a wall/floor instead, where re-finds dart
-      // toward the player in bursts (see crawlSpider.js) instead of the
-      // ceiling-only anchor skitter.
-      const preferredZone =
-        ghost.kind === 'spider'
-          ? Math.random() < 0.7
-            ? 'ceiling'
-            : Math.random() < 0.5
-              ? 'floor'
-              : 'wall'
-          : Math.random() < 0.5
-            ? 'floor'
-            : 'wall'
+      const zonePool = ghost.kind === 'spider' ? 'ceiling' : 'wall'
       // SKELETON_MAX_HEIGHT caps wall selection to a human eye-level band
       // regardless of room height — fixes skeletons spawning uncomfortably
       // close to the ceiling in unusually tall/vaulted rooms, where the
       // full 0.85m-1.85m 'wall' band's upper end can still look "stuck at
       // the top" on screen even though it's technically a valid wall point.
-      // Doesn't apply to floor points (they're near y=0 by definition).
-      const heightCap = ghost.kind === 'spider' || preferredZone === 'floor' ? null : SKELETON_MAX_HEIGHT
+      const heightCap = ghost.kind === 'spider' ? null : SKELETON_MAX_HEIGHT
       const zonePoint =
-        surfaceSampler.getRandomPoint(preferredZone, heightCap) ||
-        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('wall', SKELETON_MAX_HEIGHT) : null) ||
-        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('furniture', SKELETON_MAX_HEIGHT) : null)
+        surfaceSampler.getRandomPoint(zonePool, heightCap) ||
+        (ghost.kind !== 'spider' ? surfaceSampler.getRandomPoint('furniture', heightCap) : null)
       // Fall back to whatever the scheduler originally picked if this
       // entity's preferred zone hasn't been scanned yet — better to spawn
       // somewhere than not spawn at all.
@@ -220,7 +202,7 @@ const initScenePipelineModule = () => {
     debugLog(
       `Spawning ${ghost.kind} at type=${usePoint.type || 'unknown'} height=${usePoint.heightAboveFloor != null ? usePoint.heightAboveFloor.toFixed(2) + 'm' : 'n/a'} isRefind=${!!opts.isRefind}`,
     )
-    ghost.spawnAt(usePoint.position, normal, { ...opts, pointType: usePoint.type })
+    ghost.spawnAt(usePoint.position, normal, opts)
 
     // A fresh (non-refind) emergence is a real "something just appeared"
     // moment — occasionally tie a nearby wall bleed to it so the room
@@ -308,9 +290,6 @@ const initScenePipelineModule = () => {
           for (let i = 0; i < GHOST_POOL_SIZE; i++) {
             const ghost = createSkeletonGhostInstance(template, {
               onRevealPeak: () => hauntedVision.flash(450),
-              onFootstep: (position) => {
-                if (audio) audio.playPositionalOneShot('footstep', position, { volume: 0.7, refDistance: 0.6, maxDistance: 6 })
-              },
               // Asked only on a scare-only first reveal, once it's ready to
               // duck away. Excludes the point it's currently at so "flee"
               // actually means somewhere else, not a near-duplicate spot.
@@ -347,10 +326,9 @@ const initScenePipelineModule = () => {
       surfaceSampler = createSurfaceSampler({
         onPoint: (position, type) => debugVisualizer.addPoint(position, type),
       })
-      // Standalone diagnostic system for now — deliberately NOT wired into
-      // spawning/gameplay yet. Runs its own independent sampling; the
-      // debug summary below is what to check on-device before trusting
-      // this for anything.
+      // Standalone diagnostic system — deliberately NOT wired into
+      // spawning/gameplay. Runs its own independent sampling; debugSummary()
+      // below is what to check on-device before trusting this for anything.
       environmentModel = createEnvironmentModel()
 
       // spatialAudio.js's manager — wired into app.js for the first time
@@ -361,7 +339,7 @@ const initScenePipelineModule = () => {
       // path yet, spatialAudio.js's requireBuffer() just warns and no-ops
       // on playback rather than throwing, so this never blocks scene setup.
       audio = createAudioManager({ camera })
-      audio.load({ wallDrip: '/audio/wall-drip.mp3', footstep: '/audio/entity-footstep.mp3' }).catch((err) => {
+      audio.load({ wallDrip: '/audio/wall-drip.mp3' }).catch((err) => {
         debugLog(`spatialAudio: wallDrip failed to load (expected until a real file is added at /audio/wall-drip.mp3): ${err.message}`)
       })
 
@@ -392,9 +370,6 @@ const initScenePipelineModule = () => {
         const spider = createCrawlSpider({
           seed: i + 1,
           onRevealPeak: () => hauntedVision.flash(450),
-          onFootstep: (position) => {
-            if (audio) audio.playPositionalOneShot('footstep', position, { volume: 0.5, refDistance: 0.4, maxDistance: 5 })
-          },
           onNeedFleeTarget: (currentPoint) =>
             surfaceSampler.getRandomPointExcluding('any', currentPoint, 0.8),
           onDespawn: ({ fledTo } = {}) => {
@@ -633,34 +608,9 @@ const initScenePipelineModule = () => {
             }
             continue
           }
-          if (det.type === 'person') {
-            // Deliberately NOT fed into surfaceSampler's static furniture
-            // points — a person moves, so caching their position the way
-            // furniture is cached would be wrong the instant they take a
-            // step. No gameplay behavior wired to this yet; logged only,
-            // as a first checkpoint before deciding what a detected person
-            // should actually do in-scene.
-            debugLog(`Person detected at normalized (${det.normalizedCenter.x.toFixed(2)}, ${det.normalizedCenter.y.toFixed(2)}), confidence=${det.confidence.toFixed(2)}`)
-            const personHit = window.XR8.XrController.hitTest(
-              det.normalizedCenter.x * window.innerWidth,
-              det.normalizedCenter.y * window.innerHeight,
-              ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
-            )
-            if (personHit && personHit.length > 0 && debugVisualizer) {
-              const p = personHit[0].position
-              debugVisualizer.addDetection(new THREE.Vector3(p.x, p.y, p.z), 'person', 'person')
-            }
-            continue
-          }
-          // BUG FIX: normalizedCenter is 0-1 (see furnitureDetector.js),
-          // but hitTest expects real pixel coordinates — every call here
-          // was previously targeting the wrong spot on screen (clustered
-          // near pixel 0,0) regardless of where the detected object
-          // actually was. Confirmed by adding debug markers: without this
-          // fix, every furniture marker would land in the same spot.
           const results = window.XR8.XrController.hitTest(
-            det.normalizedCenter.x * window.innerWidth,
-            det.normalizedCenter.y * window.innerHeight,
+            det.normalizedCenter.x,
+            det.normalizedCenter.y,
             ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
           )
           if (results && results.length > 0) {
@@ -670,7 +620,6 @@ const initScenePipelineModule = () => {
             if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
             normal.normalize()
             surfaceSampler.addDetectedFurniturePoint(position, normal, det.label)
-            if (debugVisualizer) debugVisualizer.addDetection(position, 'furniture', det.label)
           }
         }
       }
@@ -742,35 +691,6 @@ if ('serviceWorker' in navigator) {
   })
 }
 
-const startXr = () => {
-  window.XR8
-    ? onxrloaded()
-    : window.addEventListener('xrloaded', onxrloaded)
-}
-
-const SAFETY_ACK_KEY = 'lens_safety_ack_v1'
-const safetyBackdrop = document.getElementById('safetyBackdrop')
-const safetyAck = document.getElementById('safetyAck')
-
-let alreadyAcknowledged = false
-try {
-  alreadyAcknowledged = localStorage.getItem(SAFETY_ACK_KEY) === '1'
-} catch (err) {
-  // Private/incognito mode can throw on localStorage access — fail safe by
-  // just showing the notice every time rather than crashing startup.
-}
-
-if (alreadyAcknowledged) {
-  safetyBackdrop.classList.add('hidden')
-  startXr()
-} else {
-  safetyAck.addEventListener('click', () => {
-    try {
-      localStorage.setItem(SAFETY_ACK_KEY, '1')
-    } catch (err) {
-      // Ignore — worst case the notice shows again next launch.
-    }
-    safetyBackdrop.classList.add('hidden')
-    startXr()
-  })
-}
+window.XR8
+  ? onxrloaded()
+  : window.addEventListener('xrloaded', onxrloaded)
