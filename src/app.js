@@ -13,6 +13,7 @@ import { createAudioManager } from './spatialAudio'
 import { initSettingsPanel } from './settingsPanel'
 import { loadFurnitureDetector, requestFurnitureDetection } from './furnitureDetector'
 import { createEnvironmentModel } from './environmentModel'
+import { createDebugVisualizer } from './debugVisualizer'
 
 // 8th Wall's Threejs pipeline module expects a global window.THREE
 // (it assumes script-tag usage), but webpack keeps our import module-scoped.
@@ -89,6 +90,7 @@ const initScenePipelineModule = () => {
   let surfaceSampler, scareScheduler, gameState, captureSystem, residueField
   let bleedingWalls, hauntedFurniture, audio
   let environmentModel
+  let debugVisualizer
   let envSummaryTimer = 0
   let residueSpawnClock = 0
   let clock
@@ -341,7 +343,10 @@ const initScenePipelineModule = () => {
         .then(() => debugLog('Furniture object detector loaded.'))
         .catch((err) => debugLog(`Failed to load furniture detector: ${err.message || err}`))
 
-      surfaceSampler = createSurfaceSampler()
+      debugVisualizer = createDebugVisualizer({ scene })
+      surfaceSampler = createSurfaceSampler({
+        onPoint: (position, type) => debugVisualizer.addPoint(position, type),
+      })
       // Standalone diagnostic system for now — deliberately NOT wired into
       // spawning/gameplay yet. Runs its own independent sampling; the
       // debug summary below is what to check on-device before trusting
@@ -536,6 +541,7 @@ const initScenePipelineModule = () => {
         if (envSummaryTimer >= 5) {
           envSummaryTimer = 0
           debugLog(environmentModel.debugSummary())
+          if (debugVisualizer) debugVisualizer.setWallSegments(environmentModel.getWallSegments())
         }
       }
 
@@ -635,11 +641,26 @@ const initScenePipelineModule = () => {
             // as a first checkpoint before deciding what a detected person
             // should actually do in-scene.
             debugLog(`Person detected at normalized (${det.normalizedCenter.x.toFixed(2)}, ${det.normalizedCenter.y.toFixed(2)}), confidence=${det.confidence.toFixed(2)}`)
+            const personHit = window.XR8.XrController.hitTest(
+              det.normalizedCenter.x * window.innerWidth,
+              det.normalizedCenter.y * window.innerHeight,
+              ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
+            )
+            if (personHit && personHit.length > 0 && debugVisualizer) {
+              const p = personHit[0].position
+              debugVisualizer.addDetection(new THREE.Vector3(p.x, p.y, p.z), 'person', 'person')
+            }
             continue
           }
+          // BUG FIX: normalizedCenter is 0-1 (see furnitureDetector.js),
+          // but hitTest expects real pixel coordinates — every call here
+          // was previously targeting the wrong spot on screen (clustered
+          // near pixel 0,0) regardless of where the detected object
+          // actually was. Confirmed by adding debug markers: without this
+          // fix, every furniture marker would land in the same spot.
           const results = window.XR8.XrController.hitTest(
-            det.normalizedCenter.x,
-            det.normalizedCenter.y,
+            det.normalizedCenter.x * window.innerWidth,
+            det.normalizedCenter.y * window.innerHeight,
             ['FEATURE_POINT', 'ESTIMATED_SURFACE'],
           )
           if (results && results.length > 0) {
@@ -649,6 +670,7 @@ const initScenePipelineModule = () => {
             if (normal.lengthSq() < 0.0001) normal.set(0, 0, 1)
             normal.normalize()
             surfaceSampler.addDetectedFurniturePoint(position, normal, det.label)
+            if (debugVisualizer) debugVisualizer.addDetection(position, 'furniture', det.label)
           }
         }
       }

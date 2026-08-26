@@ -85,7 +85,7 @@ const classifySurface = (hitResult, lowestY) => {
 const isFarEnoughFromPool = (pool, position) =>
   pool.every((p) => p.position.distanceTo(position) > MIN_POINT_SPACING)
 
-export const createSurfaceSampler = () => {
+export const createSurfaceSampler = ({ onPoint } = {}) => {
   const pools = { wall: [], ceiling: [], floor: [], furniture: [], other: [] }
   let hasLoggedSample = false
   // Running floor-height estimate. NOT a simple running minimum anymore —
@@ -199,14 +199,22 @@ export const createSurfaceSampler = () => {
       normal.normalize()
     }
 
-    pool.push({ position, normal, type })
+    pool.push({ position, normal, type, heightAboveFloor: hit.position.y - lowestY })
+    if (onPoint) onPoint(position, type)
   }
 
   const update = () => {
     for (let i = 0; i < SAMPLES_PER_TICK; i++) sampleOnce()
   }
 
-  const getRandomPoint = (type = 'any') => {
+  // maxHeightAboveFloor: optional — narrows selection to points below a
+  // height cap, regardless of the type's full classification band. Added
+  // because fixed absolute height bands (wall = 0.85m-1.85m) don't scale to
+  // unusually tall rooms (vaulted/gabled roofs) — a technically-correct
+  // "wall" point near the top of that band can still visually read as
+  // "stuck near the ceiling" in a tall room. Skeletons request a tighter
+  // human-eye-level cap via this; spiders don't (they WANT high placement).
+  const getRandomPoint = (type = 'any', maxHeightAboveFloor = null) => {
     let pool
     if (type === 'any') {
       pool = [...pools.wall, ...pools.ceiling, ...pools.floor, ...pools.furniture, ...pools.other]
@@ -214,6 +222,12 @@ export const createSurfaceSampler = () => {
       pool = pools[type]
     }
     if (!pool || pool.length === 0) return null
+    if (maxHeightAboveFloor != null) {
+      const filtered = pool.filter((p) => p.heightAboveFloor <= maxHeightAboveFloor)
+      if (filtered.length > 0) pool = filtered
+      // If nothing qualifies, fall through to the unfiltered pool rather
+      // than returning null — better to spawn somewhere than nowhere.
+    }
     return pool[Math.floor(Math.random() * pool.length)]
   }
 
